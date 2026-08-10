@@ -401,7 +401,7 @@ const commands = {
       const code = github.parseCode(source);
       if (!code) die('that gh: code looks malformed — copy the whole thing, including the # part');
       if (!code.key) die('that code has no key on the end — copy the whole line, including the # part');
-      const blob = github.get(code.id);
+      const blob = await github.get(code.id);
       b = parseBundle(decrypt(blob, code.key));
       // Collected means consumed, exactly like the one-shot LAN transfer.
       if (github.remove(code.id)) console.log('collected, and the gist is deleted');

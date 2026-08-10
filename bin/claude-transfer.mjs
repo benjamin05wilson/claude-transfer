@@ -1,0 +1,551 @@
+#!/usr/bin/env node
+/**
+ * claude-transfer — the plumbing behind /transfer.
+ *
+ * You are not meant to type these. Use `/transfer` in Claude Code, which drives
+ * this. The commands exist so the skill has something to call, and so there is a
+ * way in when Claude Code itself is not available.
+ *
+ *   claude-transfer list                        resumable sessions here, newest first
+ *   claude-transfer out [session] [-o file]     package a session into a .claude-transfer bundle
+ *                                    (--redact to strip secrets, --preview to see them)
+ *                                    (--with-files to send the working folder too)
+ *   claude-transfer send [session]              hand it straight to the other machine
+ *                                    (--via github to go through a private gist)
+ *   claude-transfer in <file|url|gh:code> [--into <dir>]  unpack it here, print the resume command
+ *                                    (--sync to check out its commit, --apply-diff for its edits)
+ *   claude-transfer check <file>                inspect a bundle without unpacking it
+ *   claude-transfer setup                       install the /transfer skill for Claude Code
+ *
+ * The whole conversation travels, not a summary — you reopen the same chat and
+ * carry on. What makes that work, reverse-engineered from Claude Code 2.1.226:
+ *
+ *   projects/<enc-cwd>/<id>.jsonl   the conversation, and the control records
+ *                                   `/resume` reads for its title and preview
+ *   projects/<enc-cwd>/<id>/        subagents, workflows, tool results
+ *   file-history/<id>/              undo and rewind snapshots
+ *   history.jsonl                   ↑ prompt recall, keyed by id and project
+ *
+ * All four are keyed by session id, so an import mints a new id and rewrites it
+ * everywhere. Two record types are deliberately dropped: `frame-link` points
+ * into the exporting machine's temp directory, and `bridge-session` ties the
+ * session to a cloud session that is not yours to inherit.
+ *
+ * The whole transcript travels intact by default. Moving your own session to
+ * your own machine over an encrypted one-shot channel does not increase
+ * exposure — the secret is already at both ends — and redaction is
+ * irreversible, so `claude-transfer` tells you what a bundle contains and leaves it alone.
+ * `--redact` is for the cases that warrant it: a bundle written to a file, which
+ * can travel anywhere, or a session going to somebody who is not you.
+ */
+
+import { readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, rmSync } from 'node:fs';
+import { gzipSync, gunzipSync } from 'node:zlib';
+import { homedir, hostname, platform } from 'node:os';
+import { resolve, join, basename, dirname } from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+import {
+  listSessions, findSession, readTranscript, writeTranscript, describe, rehome,
+  destinationFor, newSessionId, projectsRoot, footprint, stripMachineLocal,
+  packDir, unpackDir, readHistoryFor, appendHistory, encodeProjectDir, safeEntryPath, makeSwapper,
+} from '../src/session.mjs';
+import { redactText, redactTranscript, portablePaths, formatReport, summarise } from '../src/redact.mjs';
+import { serveOnce, collect, looksLikeUrl, MAX_BUNDLE_BYTES, lanAddress, reachBeyondLan, encrypt, decrypt } from '../src/wire.mjs';
+import { captureWorkspace, inspectTarget, compareWorkspace, checkout, applyDiff } from '../src/workspace.mjs';
+import * as github from '../src/github.mjs';
+import { collectFolder, conflicts, MAX_FOLDER_BYTES } from '../src/folder.mjs';
+
+const FORMAT = 3;
+const die = (m) => { console.error(`claude-transfer: ${m}`); process.exit(1); };
+const human = (n) => (n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+const claudeDir = () => dirname(projectsRoot());
+
+function parseArgs(argv) {
+  const f = { __proto__: null, _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      const k = a.slice(2);
+      const next = argv[i + 1];
+      // Any leading dash means the next flag, not this one's value. Checking
+      // only for `--` meant `--with-files -o out.claude-transfer` swallowed the `-o` and
+      // silently wrote to the default filename.
+      if (next === undefined || next.startsWith('-')) f[k] = true;
+      else { f[k] = next; i++; }
+    } else if (a === '-o') f.out = argv[++i];
+    else f._.push(a);
+  }
+  return f;
+}
+
+/**
+ * Read a flag that must carry a value.
+ *
+ * `--into` with nothing after it parses as `true`, and passing that to a path
+ * function throws `The "paths[0]" argument must be of type string`, which tells
+ * the user nothing about what they typed wrong.
+ */
+function strFlag(flags, name, fallback = undefined) {
+  const value = flags[name];
+  if (value === undefined) return fallback;
+  if (typeof value !== 'string') die(`--${name} needs a value, e.g. --${name} .`);
+  return value;
+}
+
+/** Reject an unrecognised choice rather than quietly doing something else. */
+function oneOf(value, allowed, name) {
+  if (value !== undefined && !allowed.includes(value)) {
+    die(`--${name} must be one of: ${allowed.join(', ')} (got ${JSON.stringify(value)})`);
+  }
+  return value;
+}
+
+const isTextish = (buf) => !buf.includes(0) && buf.length < 8 * 1024 * 1024;
+
+/**
+ * Claude sessions running on this machine right now, and where.
+ *
+ * Used only to point out a likely mistake — landing a session in a directory
+ * that is not the one the user is actually working in. Best effort: if the CLI
+ * is missing or the shape changes, we simply say nothing.
+ */
+function runningSessions() {
+  try {
+    const res = spawnSync('claude', ['agents', '--json'], { encoding: 'utf8', timeout: 5000 });
+    if (res.status !== 0) return [];
+    const list = JSON.parse(res.stdout);
+    return Array.isArray(list) ? list.filter((s) => s?.cwd) : [];
+  } catch { return []; }
+}
+
+/** Redact and de-personalise the sidecar files — they are transcripts too. */
+function cleanFiles(files, { home, seen, findings, scanOnly = true }) {
+  const out = {};
+  let paths = 0;
+  for (const [rel, b64] of Object.entries(files)) {
+    const buf = Buffer.from(b64, 'base64');
+    if (!isTextish(buf)) { out[rel] = b64; continue; }
+    const { text, findings: found } = redactText(buf.toString('utf8'), { seen, scanOnly });
+    findings.push(...found);
+    const portable = portablePaths(text, home);
+    paths += portable.count;
+    out[rel] = Buffer.from(portable.text).toString('base64');
+  }
+  return { files: out, paths };
+}
+
+/**
+ * Package a session: strip machine-local records, redact, pack the sidecars,
+ * and compress. Shared by `out` (writes a file) and `send` (hands it over).
+ */
+function build(flags) {
+  const wanted = flags._[0];
+  const session = wanted ? findSession(wanted) : listSessions()[0];
+  if (!session) die(wanted ? `no session matching "${wanted}"` : 'no sessions found');
+
+  const paths = footprint(session, { claudeDir: claudeDir() });
+  const raw = readTranscript(paths.transcript);
+  const kept = stripMachineLocal(raw);
+  const info = describe(kept);
+  const title = raw.find((r) => r.type === 'ai-title')?.aiTitle ?? null;
+
+  // Full fidelity by default. Your session going to your own machine over an
+  // encrypted one-shot channel does not increase exposure — the secret is
+  // already at both ends — and redacting is irreversible: the placeholder is all
+  // the bundle carries, so the resumed conversation reads mangled text forever.
+  // Scanning tells you what is in there without touching a byte.
+  const redacting = flags.redact === true;
+  const seen = new Map();
+  const findings = [];
+  const scanOpts = { home: homedir(), seen, scanOnly: !redacting };
+
+  const done = redactTranscript(kept, scanOpts);
+  const transcript = done.records;
+  let report = done.report;
+
+  const a = cleanFiles(packDir(paths.sidecars), { home: homedir(), seen, findings, scanOnly: !redacting });
+  const b = cleanFiles(packDir(paths.fileHistory), { home: homedir(), seen, findings, scanOnly: !redacting });
+  const sidecars = a.files;
+  const history = b.files;
+
+  // Fold the sidecar findings into the same report the transcript produced.
+  const asFindings = report.rows.flatMap((r) => [
+    ...Array.from({ length: r.redacted }, () => ({ id: r.id, label: r.label, fake: false })),
+    ...Array.from({ length: r.examples }, () => ({ id: r.id, label: r.label, fake: true })),
+  ]);
+  report = summarise([...asFindings, ...findings], report.pathsRewritten + a.paths + b.paths);
+
+  const prompts = readHistoryFor(paths.historyLog, session.id);
+  const workspace = captureWorkspace(info.cwd);
+
+  // The files themselves, when the far machine cannot fetch the repository —
+  // private, unconfigured, or never a repository at all.
+  const folder = flags['with-files']
+    ? collectFolder(info.cwd, { includeUntracked: flags['include-untracked'] === true })
+    : { files: {}, bytes: 0, count: 0, method: 'not included', skipped: [], truncated: false };
+
+  // Home paths are always made portable — that is re-homing, not redaction, and
+  // the import puts the receiving machine's home back.
+  const portable = (text) => (text ? portablePaths(text, homedir()).text : text ?? null);
+  const scrub = (text) => {
+    if (!text) return null;
+    const out = redactText(text, { seen, scanOnly: !redacting });
+    findings.push(...out.findings);
+    return portable(out.text);
+  };
+
+  console.log(`session   ${session.id}${title ? `  — ${title}` : ''}`);
+  console.log(`from      ${info.cwd}`);
+  console.log(`carries   transcript ${info.records} records`
+    + `  ·  sidecars ${Object.keys(sidecars).length} files`
+    + `  ·  file-history ${Object.keys(history).length}`
+    + `  ·  ${prompts.length} prompts`);
+  console.log(`dropped   ${raw.length - kept.length} machine-local records (frame-link, bridge-session)`);
+  if (flags['with-files']) {
+    console.log(`files     ${folder.count} file(s), ${human(folder.bytes)}  ·  ${folder.method}`);
+    if (folder.skipped.length) {
+      console.log(`          skipped ${folder.skipped.length} large file(s): `
+        + folder.skipped.slice(0, 3).map((s2) => `${s2.path} (${s2.why})`).join(', '));
+    }
+    if (folder.truncated) console.log('          stopped early — the folder is bigger than a bundle should be');
+    if (!flags['include-untracked'] && folder.method.startsWith('git')) {
+      console.log('          tracked files only, so .gitignore still applies (--include-untracked to override)');
+    }
+  }
+  console.log(`workspace ${workspace.isRepo
+    ? `${workspace.branch ?? 'detached'} @ ${workspace.head?.slice(0, 8)}`
+      + (workspace.dirty ? `  ·  ${workspace.changedFiles} uncommitted file(s)${workspace.diff ? ', diff included' : ''}` : ' · clean')
+      + (workspace.diffTruncated ? '  ·  diff too large, omitted' : '')
+    : workspace.reason}`);
+
+  const body = formatReport(report);
+  console.log(redacting ? 'redacted' : 'contains');
+  console.log(body || '  nothing notable');
+  if (!redacting && report.redacted) {
+    console.log('  (left intact — this is your data. `--redact` replaces it, irreversibly)');
+  }
+  if (flags.preview) {
+    for (const f of findings.filter((x) => x.context).slice(0, 40)) {
+      console.log(`    ${f.label}: ${f.context.slice(0, 100)}`);
+    }
+  }
+
+  const bundle = {
+    format: FORMAT,
+    created: new Date().toISOString(),
+    origin: {
+      host: hostname(), platform: platform(),
+      cwd: portable(info.cwd), branches: info.branches, versions: info.versions,
+    },
+    session: { id: session.id, title: scrub(title), records: info.records, firstPrompt: scrub(info.firstPrompt) },
+    redaction: { applied: redacting, rows: report.rows, redacted: report.redacted, pathsRewritten: report.pathsRewritten },
+    workspace,
+    folder: folder.files,
+    folderMeta: { count: folder.count, bytes: folder.bytes, method: folder.method, truncated: folder.truncated },
+    transcript: transcript.map((r) => r.__raw ?? JSON.stringify(r)),
+    sidecars,
+    fileHistory: history,
+    prompts,
+  };
+
+  const json = JSON.stringify(bundle);
+  return { gz: gzipSync(Buffer.from(json), { level: 9 }), rawSize: json.length, session, title, report, redacting };
+}
+
+const commands = {
+  __proto__: null,
+
+  list() {
+    const sessions = listSessions().slice(0, 25);
+    if (!sessions.length) return console.log('no sessions found');
+    for (const s of sessions) {
+      const records = readTranscript(s.path);
+      const title = records.find((r) => r.type === 'ai-title')?.aiTitle;
+      const info = describe(records);
+      console.log(`${s.id.slice(0, 8)}  ${s.modified.slice(0, 16).replace('T', ' ')}  ${human(s.bytes).padStart(7)}  ${title ?? info.firstPrompt ?? '(untitled)'}`);
+      console.log(`          ${info.cwd ?? '?'}`);
+    }
+  },
+
+  out(flags) {
+    const { gz, rawSize, session, report, redacting } = build(flags);
+    const out = resolve(strFlag(flags, 'out', `${session.id.slice(0, 8)}.claude-transfer`));
+    writeFileSync(out, gz);
+
+    // A file is the one route that can end up somewhere you did not intend — a
+    // shared drive, a repo, a chat thread. The encrypted one-shot wire cannot,
+    // so `send` stays quiet about this.
+    if (!redacting && report.redacted) {
+      console.log(`\n⚠  this file contains ${report.redacted} credential-shaped value(s), unredacted.`);
+      console.log('   Fine for your own machines. Re-run with --redact before sharing it.');
+    }
+    console.log(`\nwrote ${out}  (${human(gz.length)} from ${human(rawSize)})`);
+    console.log(`sha256 ${createHash('sha256').update(gz).digest('hex').slice(0, 16)}`);
+    console.log(`\nOn the other machine: /transfer → Receive, and give it this file.`);
+  },
+
+  /**
+   * Hand the session straight to the other machine.
+   *
+   * Served once, on the local network, to whoever asks first with the right
+   * token — then the server stops. No cloud, no third party, nothing stored:
+   * the bytes go from this machine to that one and nowhere else.
+   */
+  async send(flags) {
+    oneOf(flags.via, ['lan', 'github'], 'via');
+    const { gz, rawSize } = build(flags);
+
+    if (flags.via === 'github') {
+      const keyHex = randomBytes(32).toString('hex');
+      const blob = encrypt(gz, keyHex);
+      let created;
+      try { created = github.put(blob, { description: github.anonymousDescription() }); }
+      catch (err) { return die(err.message); }
+
+      console.log(`\nuploaded ${human(blob.length)} to a private gist`);
+      console.log('GitHub holds ciphertext only — the key below never leaves this machine\'s output.\n');
+      console.log('On the other machine: /transfer → Receive, and paste this code.\n');
+      console.log(`  ${github.buildCode(created.id, keyHex)}\n`);
+      console.log('It is deleted as soon as it is collected. Both machines never need to be');
+      console.log('awake at the same time.');
+      return;
+    }
+
+    const { url, done } = await serveOnce(gz, {
+      port: Number(flags.port) || 0,
+      timeout: (Number(flags.wait) || 600) * 1000,
+    });
+
+    const addr = lanAddress();
+    console.log(`\nready    ${human(gz.length)} from ${human(rawSize)}`);
+    console.log(reachBeyondLan(addr)
+      ? `reach    ${addr} — a tailnet address, so this works from anywhere`
+      : `reach    ${addr} — a local address, so the other machine must be on this network`);
+    if (!reachBeyondLan(addr)) {
+      console.log('         (tailscale on both machines makes this work anywhere)');
+    }
+    console.log(`\nOn the other machine: /transfer → Receive, and paste this code.\n`);
+    console.log(`  ${url}\n`);
+    console.log('waiting — this stops as soon as it is collected (Ctrl-C to cancel)');
+
+    const outcome = await done;
+    console.log(outcome === 'collected' ? '\ncollected. the session is on the other machine.' : '\ntimed out, nothing sent.');
+    process.exit(outcome === 'collected' ? 0 : 1);
+  },
+
+  /**
+   * Install the `/transfer` skill, so the whole thing is reachable by typing
+   * `/transfer` in Claude Code rather than remembering a CLI.
+   */
+  setup(flags) {
+    const claudeHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
+    const dest = join(claudeHome, 'skills', 'transfer');
+    const source = fileURLToPath(new URL('../skills/transfer', import.meta.url));
+
+    if (flags.uninstall) {
+      rmSync(dest, { recursive: true, force: true });
+      console.log(`removed ${dest}`);
+      return;
+    }
+
+    if (!existsSync(source)) die(`cannot find the skill to install (looked in ${source})`);
+    mkdirSync(join(dest, '..'), { recursive: true });
+    cpSync(source, dest, { recursive: true });
+
+    console.log(`installed  ${dest}`);
+    console.log(`command    claude-transfer  (${process.argv[1]})`);
+    const open = runningSessions();
+    console.log(open.length
+      ? `\nType /transfer in Claude Code. Reload an open session first — skills are read at startup,\nunlike sessions.`
+      : '\nType /transfer in Claude Code.');
+  },
+
+  check(flags) {
+    const b = load(flags._[0]);
+    console.log(`format     ${b.format}`);
+    console.log(`created    ${b.created}`);
+    console.log(`origin     ${b.origin.host} (${b.origin.platform})  Claude Code ${b.origin.versions.join('/') || '?'}`);
+    console.log(`cwd        ${b.origin.cwd}`);
+    console.log(`title      ${b.session.title ?? '(untitled)'}`);
+    console.log(`carries    ${b.session.records} records  ·  ${Object.keys(b.sidecars ?? {}).length} sidecars`
+      + `  ·  ${Object.keys(b.fileHistory ?? {}).length} history files  ·  ${(b.prompts ?? []).length} prompts`);
+    console.log(`redacted   ${b.redaction.applied ? `${b.redaction.redacted} secrets, ${b.redaction.pathsRewritten} paths` : 'NO — raw bundle'}`);
+
+    // A count is not an inspection. Show the paths, because these are the files
+    // the bundle will write on this machine, and flag any that try to escape.
+    const keys = [...Object.keys(b.sidecars ?? {}), ...Object.keys(b.fileHistory ?? {})];
+    const hostile = keys.filter((k) => !safeEntryPath('/probe', k));
+    if (hostile.length) {
+      console.log(`\n⚠  ${hostile.length} entr${hostile.length === 1 ? 'y' : 'ies'} would write OUTSIDE the target directory:`);
+      for (const k of hostile.slice(0, 10)) console.log(`     ${k}`);
+      console.log('   `claude-transfer in` will refuse this bundle. Do not trust its source.');
+      return;
+    }
+    if (flags.files && keys.length) {
+      console.log('\nfiles it would write:');
+      for (const k of keys) console.log(`  ${k}`);
+    } else if (keys.length) {
+      console.log(`\n(${keys.length} files — pass --files to list them)`);
+    }
+  },
+
+  async in(flags) {
+    const source = flags._[0];
+    if (!source) die('need a bundle file, a claude-transfer URL, or a gh: code');
+
+    let b;
+    if (github.looksLikeGhCode(source)) {
+      const code = github.parseCode(source);
+      if (!code) die('that gh: code looks malformed — copy the whole thing, including the # part');
+      if (!code.key) die('that code has no key on the end — copy the whole line, including the # part');
+      const blob = github.get(code.id);
+      b = parseBundle(decrypt(blob, code.key));
+      // Collected means consumed, exactly like the one-shot LAN transfer.
+      if (github.remove(code.id)) console.log('collected, and the gist is deleted');
+      else console.log('collected (could not delete the gist — remove it yourself if you like)');
+    } else {
+      b = looksLikeUrl(source) ? parseBundle(await collect(source)) : load(source);
+    }
+    if (b.format > FORMAT) die(`bundle format ${b.format}; this build understands up to ${FORMAT}`);
+
+    const into = resolve(strFlag(flags, 'into', process.cwd()));
+    mkdirSync(into, { recursive: true });
+
+    const id = newSessionId();
+    const records = b.transcript.map((line) => {
+      try { return JSON.parse(line); } catch { return { __raw: line }; }
+    });
+
+    // `origin.cwd` is already stored in portable form (`‹home›/…`), which is
+    // also why the bundle never carries the sender's username.
+    const portableCwd = b.origin.cwd;
+    if (typeof portableCwd !== 'string' || !portableCwd) {
+      die('this bundle records no working directory — it may be truncated');
+    }
+    // The sidecars go through exactly the same boundary-aware substitution as
+    // the transcript. A blind split/join here would reintroduce the bug `rehome`
+    // exists to prevent, and leave the two describing different machines.
+    const swap = makeSwapper({
+      fromCwd: portableCwd, toCwd: into,
+      fromId: b.session.id, toId: id,
+      fromHome: '‹home›', toHome: homedir(),
+    });
+
+    writeTranscript(destinationFor(into, id), rehome(records, {
+      fromCwd: portableCwd, toCwd: into,
+      fromId: b.session.id, toId: id,
+      fromHome: '‹home›', toHome: homedir(),
+    }));
+
+    // Does the work this conversation is about actually exist here?
+    const here = inspectTarget(into);
+    const ws = compareWorkspace(b.workspace, here, into);
+
+    const sidecarDir = join(projectsRoot(), encodeProjectDir(into), id);
+    const nSide = unpackDir(sidecarDir, b.sidecars, swap);
+
+    // File-history is `/rewind`'s undo data. Restoring another machine's
+    // snapshots into a checkout at a different commit means a rewind writes
+    // foreign content over real files and destroys uncommitted work. Only when
+    // the workspace genuinely matches.
+    const nHist = ws.safeForFileHistory
+      ? unpackDir(join(claudeDir(), 'file-history', id), b.fileHistory, swap)
+      : 0;
+    const skippedHist = ws.safeForFileHistory ? 0 : Object.keys(b.fileHistory ?? {}).length;
+
+    const nPrompts = appendHistory(join(claudeDir(), 'history.jsonl'),
+      (b.prompts ?? []).map((p) => ({ ...p, sessionId: id, project: into })));
+
+    console.log(`landed     ${destinationFor(into, id)}`);
+    console.log(`restored   ${nSide} sidecar files  ·  ${nHist} history files  ·  ${nPrompts} prompts`);
+
+    // Restoring the folder is the one part that can overwrite work you already
+    // have, so it never happens silently and never wins a conflict by default.
+    const incoming = b.folder ?? {};
+    if (Object.keys(incoming).length) {
+      const clashes = conflicts(into, incoming);
+      if (clashes.length && !flags['overwrite-files']) {
+        console.log(`\nfiles      ${Object.keys(incoming).length} carried, NOT written —`
+          + ` ${clashes.length} already exist here and differ:`);
+        for (const c of clashes.slice(0, 5)) console.log(`             ${c}`);
+        if (clashes.length > 5) console.log(`             …and ${clashes.length - 5} more`);
+        console.log('           re-run with --overwrite-files to replace them');
+      } else {
+        const written = unpackDir(into, incoming, null);
+        console.log(`\nfiles      restored ${written} file(s) into ${into}`
+          + (clashes.length ? ` (${clashes.length} overwritten)` : ''));
+      }
+    }
+
+    console.log(`\nworkspace  ${ws.summary}`);
+    for (const action of ws.actions) console.log(`           ${action}`);
+    if (skippedHist) {
+      console.log(`           skipped ${skippedHist} rewind snapshot(s) — they belong to a different checkout,`);
+      console.log('           and applying them here could overwrite your own work');
+    }
+
+    if (ws.state === 'different-commit' && flags.sync) {
+      const moved = checkout(into, b.workspace.head);
+      console.log(moved.ok ? `           checked out ${b.workspace.head.slice(0, 8)}` : `           could not check out: ${moved.error}`);
+    }
+    if (flags['apply-diff'] && b.workspace?.diff) {
+      const applied = applyDiff(into, b.workspace.diff);
+      console.log(applied.ok ? '           re-applied the uncommitted changes' : `           could not apply the diff: ${applied.error}`);
+    }
+
+    if (!b.redaction.applied) console.log('\nnote: this bundle carries the transcript intact, secrets and all');
+    const mine = process.env.CLAUDE_CODE_VERSION;
+    if (mine && b.origin.versions.length && !b.origin.versions.includes(mine)) {
+      console.log(`note: written by Claude Code ${b.origin.versions.join('/')}, you are on ${mine}`);
+    }
+    // `/resume` lists the sessions belonging to the directory it is running in,
+    // and it reads them off disk each time — so a session that lands in the
+    // wrong directory is invisible even though the import succeeded. If a
+    // Claude session is open somewhere else, that is almost always the mistake.
+    const elsewhere = runningSessions().filter((s) => s.cwd && resolve(s.cwd) !== into);
+    const alreadyHere = runningSessions().some((s) => s.cwd && resolve(s.cwd) === into);
+
+    console.log(`\nresume it:  claude --resume ${id}`);
+    if (alreadyHere) {
+      console.log(`\nA Claude session is already open here — press /resume and pick`);
+      console.log(`  "${b.session.title ?? '(untitled)'}". No restart needed.`);
+    } else {
+      console.log('or run `claude` there and pick it from /resume');
+      if (elsewhere.length) {
+        console.log(`\nnote: your open Claude session${elsewhere.length > 1 ? 's are' : ' is'} in`);
+        for (const s of elsewhere.slice(0, 3)) console.log(`        ${s.cwd}`);
+        console.log('      /resume only lists sessions for the directory it runs in, so re-run');
+        console.log(`      with --into "${elsewhere[0].cwd}" if you want it to show up there.`);
+      }
+    }
+  },
+};
+
+function parseBundle(buf) {
+  // Without a ceiling, a small crafted archive expands until the machine dies.
+  try { return JSON.parse(gunzipSync(buf, { maxOutputLength: MAX_BUNDLE_BYTES }).toString()); }
+  catch (err) {
+    if (/maxOutputLength|buffer/i.test(err.message)) return die('that bundle expands to an absurd size — refusing it');
+    return die('that is not a claude-transfer bundle');
+  }
+}
+
+function load(file) {
+  if (!file) die('need a bundle file');
+  let buf;
+  try { buf = readFileSync(resolve(file)); } catch { return die(`cannot read ${file}`); }
+  return parseBundle(buf);
+}
+
+const argv = process.argv.slice(2);
+const name = argv[0];
+if (!name || !Object.hasOwn(commands, name)) {
+  const src = readFileSync(new URL(import.meta.url), 'utf8');
+  console.log(src.slice(src.indexOf('/**') + 3, src.indexOf('*/'))
+    .split('\n').map((l) => l.replace(/^\s*\* ?/, '')).join('\n').trim());
+  process.exit(name ? 1 : 0);
+}
+try { await commands[name](parseArgs(argv.slice(1))); } catch (e) { die(e.message); }

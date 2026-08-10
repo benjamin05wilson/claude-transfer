@@ -1,0 +1,46 @@
+{
+  "name": "claude-transfer",
+  "version": "1.0.0",
+  "description": "Move a Claude Code session to another computer and carry on there, with its full history.",
+  "type": "module",
+  "bin": {
+    "claude-transfer": "./bin/claude-transfer.mjs"
+  },
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "skills",
+    "install.sh",
+    "install.ps1",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node -e \"console.log('\\nclaude-transfer installed. Run: claude-transfer setup\\n')\""
+  },
+  "keywords": [
+    "claude-code",
+    "claude",
+    "session",
+    "transfer",
+    "teleport",
+    "resume",
+    "handoff",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/benjamin05wilson/claude-transfer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/benjamin05wilson/claude-transfer/issues"
+  },
+  "homepage": "https://github.com/benjamin05wilson/claude-transfer#readme",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

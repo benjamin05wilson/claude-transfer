@@ -1,0 +1,5 @@
+node_modules/
+*.transfer
+*.log
+*.tgz
+.DS_Store

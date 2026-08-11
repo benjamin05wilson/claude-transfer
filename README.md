@@ -243,6 +243,6 @@ claude-transfer setup                            (re)install the /transfer skill
 
 <div align="center"><sub>
 
-MIT ·
+MIT
 
 </sub></div>

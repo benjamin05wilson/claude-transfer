@@ -12,6 +12,12 @@ Claude Code can already pull a *web* session down to a terminal (`/teleport`)
 and drive a *local* session from a phone (`/remote-control`). It cannot move a
 local session to another machine. This does.
 
+**It copies rather than moves.** The sending machine keeps its session, and both
+sides stay resumable. Say so when someone sends one — "move" invites the
+assumption that the original is gone, and the two copies can then drift apart
+without either side noticing. If they want only one live copy,
+`claude-transfer archive <id>` retires this side without deleting it.
+
 **This slash command is the whole interface.** `claude-transfer` underneath is plumbing —
 never tell the user to run it, never show them its flags, and never leave them
 holding a command to type. They chose a menu item; give them a sentence and a

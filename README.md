@@ -2,7 +2,7 @@
 
 # claude-transfer
 
-**Move a Claude Code session to another computer and carry on there.**
+**Pick up a Claude Code conversation on another computer, with its full history.**
 
 [![MIT](https://img.shields.io/badge/licence-MIT-1c6ea4?style=flat-square)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-1c6ea4?style=flat-square)](https://nodejs.org)
@@ -20,8 +20,15 @@ one from your laptop to your desktop.
 > You can pull a web session down to your terminal, but you cannot push an
 > existing local session up to the web.
 
-This is the missing direction. The whole conversation moves — not a summary.
+This is the missing direction. The whole conversation travels — not a summary.
 Same chat, same history, same place in it.
+
+**It makes a resumable copy.** The original stays on the sending machine and both
+sides can carry on independently, which is usually what you want — the laptop
+still has it if the desktop import goes wrong. It does mean two histories that
+can drift apart, so when you have finished with one side,
+`claude-transfer archive` retires it: it stops appearing in `/resume` there,
+nothing is deleted, and it can be restored.
 
 <br>
 
@@ -250,6 +257,10 @@ claude-transfer send [session] [--via github]    hand it to the other machine
 claude-transfer in <file|url|gh:code> --into .   pick it up here
   --sync                                         check out the session's commit
   --apply-diff                                   restore its uncommitted changes
+claude-transfer sync <session-id>                line the working tree up afterwards
+  --checkout                                     move to the session's commit
+  --apply-diff                                   restore its uncommitted changes
+claude-transfer archive <session>                retire this side; --restore puts it back
 claude-transfer check <file> [--files]           inspect a bundle first
 claude-transfer setup                            (re)install the /transfer skill
 ```

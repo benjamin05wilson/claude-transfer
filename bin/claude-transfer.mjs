@@ -827,6 +827,20 @@ const commands = {
       renameSync(stagedTranscript, transcriptPath);
       if (nSide) { mkdirSync(dirname(sidecarDir), { recursive: true }); renameSync(stagedSidecars, sidecarDir); }
       if (nHist) { mkdirSync(dirname(historyDir), { recursive: true }); renameSync(stagedHistory, historyDir); }
+
+      // The receipt belongs to the session, so it is written here rather than
+      // afterwards: a session on disk with no record of where its work lives
+      // cannot be synced later, and `sync` is the only route to the workspace
+      // once the transfer has been collected.
+      writeReceipt(claudeDir(), {
+        session: id,
+        into,
+        at: new Date().toISOString(),
+        title: b.session.title ?? null,
+        origin: { host: b.origin.host, platform: b.origin.platform, versions: b.origin.versions },
+        workspace: b.workspace ?? null,
+        redacted: Boolean(b.redaction?.applied),
+      });
     } catch (e) {
       rmSync(staging, { recursive: true, force: true });
       die(`the import failed and nothing was changed: ${e.message}`
@@ -835,35 +849,27 @@ const commands = {
       rmSync(staging, { recursive: true, force: true });
     }
 
-    const nPrompts = appendHistory(join(claudeDir(), 'history.jsonl'),
-      (b.prompts ?? []).map((p) => ({ ...p, sessionId: id, project: into })));
-
-    // The workspace coordinates are written down now, so they survive the
-    // bundle. `sync` can then be run days later without a code, a file, or a
-    // second import.
-    writeReceipt(claudeDir(), {
-      session: id,
-      into,
-      at: new Date().toISOString(),
-      title: b.session.title ?? null,
-      origin: { host: b.origin.host, platform: b.origin.platform, versions: b.origin.versions },
-      workspace: b.workspace ?? null,
-      redacted: Boolean(b.redaction?.applied),
-    });
-
-    // Only now is the courier copy expendable: the session exists on disk and
-    // has been read back.
-    if (courier) {
-      console.log(github.remove(courier)
-        ? 'collected, and the transfer is deleted'
-        : 'collected (could not delete the transfer — remove it from your gists if you like)');
+    // Past this line the session exists and is resumable, so the import has
+    // succeeded. Everything remaining is an improvement on that, and a failure
+    // in one is a warning rather than a failure of the import — reporting
+    // otherwise left people with a session on disk and a message saying nothing
+    // had been written, which invites a retry that then duplicates it.
+    let nPrompts = 0;
+    try {
+      nPrompts = appendHistory(join(claudeDir(), 'history.jsonl'),
+        (b.prompts ?? []).map((p) => ({ ...p, sessionId: id, project: into })));
+    } catch (e) {
+      console.log(`⚠  the session imported, but prompt recall could not be written: ${e.message}`);
+      console.log('   the conversation is complete; only ↑ history in a new session is affected');
     }
+
 
     console.log(`landed     ${destinationFor(into, id)}`);
     console.log(`restored   ${nSide} sidecar files  ·  ${nHist} history files  ·  ${nPrompts} prompts`);
 
     // Restoring the folder is the one part that can overwrite work you already
     // have, so it never happens silently and never wins a conflict by default.
+    let restoredFiles = true;
     const incoming = b.folder ?? {};
     if (Object.keys(incoming).length) {
       const clashes = conflicts(into, incoming);
@@ -874,9 +880,18 @@ const commands = {
         if (clashes.length > 5) console.log(`             …and ${clashes.length - 5} more`);
         console.log('           re-run with --overwrite-files to replace them');
       } else {
-        const written = unpackDir(into, incoming, null);
-        console.log(`\nfiles      restored ${written} file(s) into ${into}`
-          + (clashes.length ? ` (${clashes.length} overwritten)` : ''));
+        // Files land one at a time, so a disk filling up part-way leaves the
+        // folder half restored. That is survivable only while the transfer is
+        // still collectable, which is why the courier is not deleted until
+        // after this.
+        try {
+          const written = unpackDir(into, incoming, null);
+          console.log(`\nfiles      restored ${written} file(s) into ${into}`
+            + (clashes.length ? ` (${clashes.length} overwritten)` : ''));
+        } catch (e) {
+          restoredFiles = false;
+          console.log(`\n⚠  the session imported, but the carried files did not: ${e.message}`);
+        }
       }
     }
 
@@ -894,6 +909,19 @@ const commands = {
     if (flags['apply-diff'] && b.workspace?.diff) {
       const applied = applyDiff(into, b.workspace.diff);
       console.log(applied.ok ? '           re-applied the uncommitted changes' : `           could not apply the diff: ${applied.error}`);
+    }
+
+    // The courier copy is expendable only once everything asked for has
+    // happened. Deleting it earlier meant a half-restored working folder with
+    // nothing left to retry from.
+    if (courier) {
+      if (restoredFiles) {
+        console.log(github.remove(courier)
+          ? '\ncollected, and the transfer is deleted'
+          : '\ncollected (could not delete the transfer — remove it from your gists if you like)');
+      } else {
+        console.log('\nThe transfer has been left on GitHub so you can run this again with the same code.');
+      }
     }
 
     if (!b.redaction.applied) console.log('\nnote: this bundle carries the transcript intact, secrets and all');

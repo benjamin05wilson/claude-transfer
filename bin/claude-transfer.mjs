@@ -16,6 +16,7 @@
  *                                    (--dry-run to see the import plan and write nothing)
  *   claude-transfer sync [session]              line the working tree up with an imported session
  *                                    (--checkout for its commit, --apply-diff for its edits)
+ *   claude-transfer archive [session]           retire a session here, so only one side stays live
  *   claude-transfer check <file>                inspect a bundle without unpacking it
  *   claude-transfer setup                       install the /transfer skill for Claude Code
  *
@@ -41,7 +42,7 @@
  * can travel anywhere, or a session going to somebody who is not you.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, rmSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, rmSync, renameSync, readdirSync } from 'node:fs';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { homedir, hostname, platform } from 'node:os';
 import { resolve, join, basename, dirname } from 'node:path';
@@ -376,6 +377,67 @@ const commands = {
         ? `re-applied the uncommitted changes${applied.files?.length ? ` (${applied.files.length} file(s))` : ''}`
         : `could not apply the diff: ${applied.error}`);
     }
+  },
+
+  /**
+   * Retire a session on this machine, so only one side stays live.
+   *
+   * A transfer copies. Both machines end up with a resumable session and can
+   * carry on independently, which is usually what you want — the laptop still
+   * has it if the desktop import goes wrong — but it does mean two histories
+   * that can diverge without either side noticing.
+   *
+   * Archiving moves the session out of where `/resume` looks, rather than
+   * deleting anything. It stops appearing in the list; it is still on disk, and
+   * `--restore` puts it back.
+   */
+  archive(flags) {
+    const dir = join(claudeDir(), 'claude-transfer', 'archive');
+
+    if (flags.restore) {
+      const id = strFlag(flags, 'restore');
+      if (typeof id !== 'string') die('--restore needs a session id');
+      const from = join(dir, `${id}.jsonl`);
+      const meta = join(dir, `${id}.json`);
+      if (!existsSync(from) || !existsSync(meta)) die(`nothing archived with id ${id}`);
+      const { path } = JSON.parse(readFileSync(meta, 'utf8'));
+      mkdirSync(dirname(path), { recursive: true });
+      renameSync(from, path);
+      rmSync(meta, { force: true });
+      console.log(`restored ${path}`);
+      return;
+    }
+
+    if (flags.list || !flags._[0]) {
+      if (!existsSync(dir)) return console.log('nothing archived');
+      const rows = readdirSync(dir).filter((f) => f.endsWith('.json'));
+      if (!rows.length) return console.log('nothing archived');
+      console.log('archived sessions');
+      for (const f of rows) {
+        try {
+          const m = JSON.parse(readFileSync(join(dir, f), 'utf8'));
+          console.log(`  ${m.id.slice(0, 8)}  ${m.title ?? '(untitled)'}  ·  archived ${m.at?.slice(0, 16).replace('T', ' ')}`);
+        } catch { /* a corrupt entry should not hide the rest */ }
+      }
+      console.log('\nclaude-transfer archive --restore <id>   to put one back');
+      return;
+    }
+
+    const session = findSession(flags._[0]);
+    if (!session) die(`no session matching "${flags._[0]}"`);
+
+    const records = readTranscript(session.path);
+    const title = records.find((r) => r.type === 'ai-title')?.aiTitle ?? null;
+
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${session.id}.json`), JSON.stringify({
+      id: session.id, path: session.path, title, at: new Date().toISOString(),
+    }, null, 2));
+    renameSync(session.path, join(dir, `${session.id}.jsonl`));
+
+    console.log(`archived  ${title ?? '(untitled)'}  (${session.id.slice(0, 8)})`);
+    console.log('It no longer appears in /resume here. Nothing was deleted —');
+    console.log(`restore it with:  claude-transfer archive --restore ${session.id}`);
   },
 
   list() {

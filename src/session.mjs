@@ -17,7 +17,7 @@
 
 import {
   readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync,
-  statSync, existsSync, openSync, readSync, closeSync,
+  statSync, lstatSync, existsSync, openSync, readSync, closeSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, basename, resolve, isAbsolute, sep } from 'node:path';
@@ -293,6 +293,31 @@ export function safeEntryPath(dir, rel) {
 }
 
 /**
+ * Does the path reach its destination by passing through a symlink?
+ *
+ * `safeEntryPath` is a purely lexical check: it proves the *written* path spells
+ * out somewhere inside the target. It cannot prove the path *leads* there. If
+ * `logs` already exists as a link to `/etc`, then `logs/passwd` is lexically
+ * innocent and lands outside the directory anyway.
+ *
+ * So every existing component between the root and the destination is checked,
+ * and the destination itself — writing through a symlink follows it.
+ */
+function crossesSymlink(root, target) {
+  const base = resolve(root);
+  let current = base;
+  const rest = resolve(target).slice(base.length).split(sep).filter(Boolean);
+
+  for (const part of rest) {
+    current = join(current, part);
+    let stat;
+    try { stat = lstatSync(current); } catch { return false; } // does not exist yet
+    if (stat.isSymbolicLink()) return true;
+  }
+  return false;
+}
+
+/**
  * Write a packed directory back out.
  *
  * Refuses the whole bundle if any entry tries to escape: a bundle that attempts
@@ -307,6 +332,17 @@ export function unpackDir(dir, files, transform) {
     throw new Error(
       `refusing this bundle: ${escaped.length} entr${escaped.length === 1 ? 'y' : 'ies'} `
       + `would write outside ${dir} — first was ${JSON.stringify(escaped[0])}`,
+    );
+  }
+
+  const throughLink = entries
+    .map(([rel]) => rel)
+    .filter((rel) => crossesSymlink(dir, safeEntryPath(dir, rel)));
+  if (throughLink.length) {
+    throw new Error(
+      `refusing this bundle: ${throughLink.length} entr${throughLink.length === 1 ? 'y' : 'ies'} `
+      + `would be written through a symlink and land outside ${dir} — `
+      + `first was ${JSON.stringify(throughLink[0])}`,
     );
   }
 

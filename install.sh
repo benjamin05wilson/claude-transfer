@@ -80,6 +80,22 @@ else
   warn "no Claude Code config found — claude-transfer will still install, but there is nothing to move yet"
 fi
 
+# The default Send path goes through a private gist, so gh is not optional for
+# the way most people will actually use this. Checking it here beats discovering
+# it after somebody has already been handed a transfer code.
+if command -v gh >/dev/null 2>&1; then
+  if gh auth status >/dev/null 2>&1; then
+    ok "GitHub CLI, signed in  ${DIM}(used by the default Send path)${RESET}"
+  else
+    warn "the GitHub CLI is installed but not signed in — run ${BOLD}gh auth login${RESET}"
+    warn "until then, Send can only hand over directly on the same network"
+  fi
+else
+  warn "the GitHub CLI is not installed — see https://cli.github.com"
+  warn "/transfer defaults to sending through a private gist, which needs it."
+  warn "Without gh, Send still works directly between machines on one network."
+fi
+
 if command -v git >/dev/null 2>&1; then
   ok "git $(git --version | awk '{print $3}')  ${DIM}(used to match up your working tree)${RESET}"
 else

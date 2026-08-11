@@ -67,6 +67,20 @@ $claudeDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-
 if (Test-Path $claudeDir) { Ok "Claude Code config at $claudeDir" }
 else { Warn "no Claude Code config found - claude-transfer will still install, but there is nothing to move yet" }
 
+# The default Send path goes through a private gist, so gh is not optional for
+# the way most people will actually use this.
+if (Get-Command gh -ErrorAction SilentlyContinue) {
+  gh auth status 2>&1 | Out-Null
+  if ($LASTEXITCODE -eq 0) { Ok "GitHub CLI, signed in (used by the default Send path)" }
+  else {
+    Warn "the GitHub CLI is installed but not signed in - run: gh auth login"
+    Warn "until then, Send can only hand over directly on the same network"
+  }
+} else {
+  Warn "the GitHub CLI is not installed - see https://cli.github.com"
+  Warn "/transfer defaults to sending through a private gist, which needs it."
+}
+
 if (Get-Command git -ErrorAction SilentlyContinue) {
   Ok "git $((git --version).Split(' ')[2])  (used to match up your working tree)"
 } else {

@@ -151,6 +151,15 @@ workspace  the session was on main @ b4c126c9, this checkout is on old @ 62bbb71
 It can move the checkout to that commit, or re-apply the changes that were in
 flight. Both refuse when you have uncommitted work of your own.
 
+That happens through `claude-transfer sync`, not by importing again — a transfer
+is consumed once collected, and a second import would only mint a second
+session. The coordinates are written down at import time, so syncing works days
+later with no code and no file.
+
+`--dry-run` shows the whole import plan first — what lands where, which files
+would be overwritten, whether rewind can be restored, whether secrets are still
+in the bundle — and writes nothing.
+
 **Rewind data is gated on that comparison.** Another machine's undo snapshots
 restored into a different checkout would let `/rewind` write foreign content over
 your files, so when the workspace doesn't match they're skipped — and you're told

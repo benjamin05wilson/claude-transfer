@@ -61,24 +61,36 @@ claude-transfer in <code> --into .
 `--into .` matters: `/resume` only lists sessions belonging to the directory it
 runs in, so the session must land where the user is working.
 
+Add `--dry-run` first when the user is landing something into a directory that
+already has work in it. It prints the whole import plan — what lands where, which
+files would be overwritten, whether the workspace matches — and writes nothing.
+Show them that, then run it for real. A dry run does not consume the transfer.
+
 Then tell them:
 
 - that the conversation is here, and they can pick it from `/resume` — it appears
   immediately, no restart
 - the title to look for
-- the `workspace` line in plain language. If it says a different commit, offer to
-  fix it rather than printing git commands:
+- the `workspace` line in plain language
+
+**If the workspace does not match, do not re-run the import.** The transfer is
+consumed by a successful receive, and importing again would only mint a second
+session. Use `sync`, which works from what the import recorded and needs no code
+or file:
 
 ```bash
-claude-transfer in <code> --into . --sync         # move to the session's commit
-claude-transfer in <code> --into . --apply-diff   # restore its uncommitted changes
+claude-transfer sync <session-id> --checkout      # move to the session's commit
+claude-transfer sync <session-id> --apply-diff    # restore its uncommitted changes
 ```
 
-Both refuse when the user has uncommitted work of their own. That is correct —
-say so, and offer to help them commit or stash rather than forcing it.
+`claude-transfer sync` with no arguments lists what has been imported here, with
+their ids. Both actions refuse when the user has uncommitted work of their own.
+That is correct — say so, and offer to help them commit or stash rather than
+forcing it.
 
-If files were carried and some already exist here and differ, `claude-transfer` refuses and
-lists them. Show that list and ask before re-running with `--overwrite-files`.
+If files were carried and some already exist here and differ, `claude-transfer`
+refuses and lists them. Show that list and ask before re-running with
+`--overwrite-files`.
 
 ## When the session came from the web instead
 

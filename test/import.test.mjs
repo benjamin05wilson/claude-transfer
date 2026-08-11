@@ -10,7 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, existsSync, rmSync, mkdirSync } from 'node:fs';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { join } from 'node:path';
 
@@ -152,5 +152,39 @@ test('the transcript is re-homed to the receiving directory', () => {
     assert.deepEqual(cwds, [box.work], 'every record points at the receiving directory');
     assert.ok(!readFileSync(landed, 'utf8').includes('‹home›'),
       'the portable home marker is resolved, not left in place');
+  });
+});
+
+test('a failure after the session exists is a warning, not a failed import', () => {
+  const box = sandbox();
+  try {
+    const id = box.session(['hello']);
+    // Give the bundle prompt history, so the append is actually attempted.
+    writeFileSync(join(box.config, 'history.jsonl'),
+      `${JSON.stringify({ sessionId: id, project: box.work, display: 'hello', timestamp: 1 })}\n`);
+
+    const path = join(box.root, 'b.claude-transfer');
+    cli(box, ['out', id, '-o', path]);
+
+    // A directory where the file must go: the append cannot succeed.
+    rmSync(join(box.config, 'history.jsonl'), { force: true });
+    mkdirSync(join(box.config, 'history.jsonl'), { recursive: true });
+
+    const before = sessionCount(box);
+    // Must not throw: past the commit, the import has succeeded.
+    const said = cli(box, ['in', path, '--into', box.work]);
+
+    assert.equal(sessionCount(box), before + 1, 'the session is on disk');
+    assert.match(said, /resume it:/, 'and is reported as resumable');
+    assert.match(said, /prompt recall could not be written/, 'with the shortfall named');
+  } finally { box.cleanup(); }
+});
+
+test('the receipt is committed with the session, not after it', () => {
+  withBundle((box, path) => {
+    cli(box, ['in', path, '--into', box.work]);
+    const receipts = join(box.config, 'claude-transfer', 'imports');
+    assert.equal(readdirSync(receipts).filter((f) => f.endsWith('.json')).length, 1,
+      'a session with no receipt could never be synced afterwards');
   });
 });

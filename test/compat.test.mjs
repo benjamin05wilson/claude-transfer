@@ -99,3 +99,20 @@ test('archive removes a session from the list and restores it', () => {
     assert.match(cli(box, ['list']), new RegExp(id.slice(0, 8)), 'and comes back intact');
   } finally { box.cleanup(); }
 });
+
+test('a known sender and an unknown receiver is not "verified"', () => {
+  // Knowing the sender's version says nothing about this machine's, and the
+  // half that is missing is the one about to be written to.
+  const out = assess({ sourceVersions: [VERIFIED[0]], hereVersion: null });
+  assert.notEqual(out.level, 'verified');
+  assert.equal(out.ok, false, 'it must require --force rather than proceed quietly');
+  assert.match(out.detail, /--force/);
+});
+
+test('a bundle with no versions at all is still importable', () => {
+  // Bundles predate this check; refusing them would be a regression rather
+  // than a safeguard.
+  const out = assess({ sourceVersions: [], hereVersion: null });
+  assert.equal(out.ok, true);
+  assert.equal(out.level, 'unknown');
+});

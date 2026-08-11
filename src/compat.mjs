@@ -17,6 +17,8 @@
  * worse than a documented risk knowingly taken.
  */
 
+import { spawnSync } from 'node:child_process';
+
 /** Reverse-engineered and tested end to end against this build. */
 export const VERIFIED = ['2.1.226'];
 
@@ -46,10 +48,24 @@ export function assess({ sourceVersions = [], hereVersion = null } = {}) {
   const sources = sourceVersions.filter(Boolean);
   const here = hereVersion || null;
 
-  // Nothing to judge. Not a reason to refuse — plenty of bundles predate this
-  // check, and the older behaviour was to say nothing at all.
+  // Nothing at all to judge. Not a reason to refuse — plenty of bundles predate
+  // this check, and the older behaviour was to say nothing.
   if (!sources.length && !here) {
     return { level: 'unknown', ok: true, summary: 'no version recorded on either side', detail: null };
+  }
+
+  // Knowing the sender's version says nothing about this machine's. Reporting
+  // that pair as "verified" was claiming something only half-checked — and the
+  // half that is missing is the one about to be written to.
+  if (sources.length && !here) {
+    return {
+      level: 'unknown',
+      ok: false,
+      summary: 'the Claude Code version on this machine is unknown',
+      detail: `The bundle was written by ${sources.join('/')}, but nothing here reports a version — `
+        + 'CLAUDE_CODE_VERSION is unset and `claude --version` could not be read. '
+        + `Verified against ${VERIFIED.join(', ')}. Use --force to import anyway.`,
+    };
   }
 
   const all = [...sources, here].filter(Boolean);
@@ -85,5 +101,22 @@ export function assess({ sourceVersions = [], hereVersion = null } = {}) {
   };
 }
 
-/** The version of Claude Code running this, if it told us. */
-export const hereVersion = () => process.env.CLAUDE_CODE_VERSION || null;
+/**
+ * The version of Claude Code on this machine.
+ *
+ * The environment variable is only set when the CLI is run *by* Claude Code, and
+ * the whole point of the commands existing is that they also work when it is
+ * not. Asking the binary is the fallback; if that fails too the version is
+ * genuinely unknown, which `assess` treats as a reason to stop rather than a
+ * detail to omit.
+ */
+export function hereVersion() {
+  if (process.env.CLAUDE_CODE_VERSION) return process.env.CLAUDE_CODE_VERSION;
+  try {
+    const res = spawnSync('claude', ['--version'], { encoding: 'utf8', timeout: 5000 });
+    if (res.status !== 0) return null;
+    return /(\d+\.\d+\.\d+)/.exec(res.stdout ?? '')?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}

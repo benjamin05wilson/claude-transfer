@@ -48,8 +48,12 @@ const gh = (args, input) => spawnSync('gh', args, {
 
 /** Is the `gh` CLI present and signed in? */
 export function ghStatus() {
-  const which = spawnSync('which', ['gh'], { stdio: 'ignore' });
-  if (which.status !== 0) {
+  // `which` does not exist on Windows, so this always failed there and reported
+  // gh as missing — on the very platform where /transfer defaults to GitHub
+  // delivery. `where` is the equivalent.
+  const finder = process.platform === 'win32' ? 'where' : 'which';
+  const found = spawnSync(finder, ['gh'], { stdio: 'ignore' });
+  if (found.status !== 0) {
     return { ok: false, reason: 'the GitHub CLI is not installed — see https://cli.github.com' };
   }
   const auth = gh(['auth', 'status']);

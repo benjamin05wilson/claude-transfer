@@ -17,7 +17,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, statSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, statSync, lstatSync, readdirSync, existsSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 
 export const MAX_FOLDER_BYTES = 30 * 1024 * 1024;
@@ -98,8 +98,19 @@ export function collectFolder(dir, {
     if (Object.keys(files).length >= MAX_FILES) { truncated = true; break; }
     const full = join(dir, rel);
 
-    let size;
-    try { size = statSync(full).size; } catch { continue; }
+    // `lstat`, not `stat`. A tracked symlink is a perfectly ordinary thing for a
+    // repository to contain, and `git ls-files` reports it like any other entry —
+    // but `stat` and `readFileSync` follow it, so a link named `config` pointing
+    // at `~/.aws/credentials` would package the credentials rather than the link.
+    // What .gitignore protects you from is irrelevant if a link steps over it.
+    let stat;
+    try { stat = lstatSync(full); } catch { continue; }
+    if (stat.isSymbolicLink()) {
+      skipped.push({ path: rel, why: 'symlink' });
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    const size = stat.size;
 
     if (size > maxFileBytes) {
       skipped.push({ path: rel, why: `${Math.round(size / 1048576)} MB` });

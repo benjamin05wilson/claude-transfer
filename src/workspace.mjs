@@ -162,11 +162,42 @@ export function checkout(targetDir, head) {
   return { ok: true };
 }
 
-/** Re-apply the uncommitted work the session had in flight. */
+/**
+ * Re-apply the uncommitted work the session had in flight.
+ *
+ * Refuses a dirty tree, exactly as `checkout` does. The README promised this of
+ * both and only `checkout` did it, so applying another machine's in-flight edits
+ * on top of your own uncommitted work was the one operation that could quietly
+ * destroy something with no copy anywhere — uncommitted means not in the reflog
+ * either.
+ *
+ * `--check` runs first so a patch that cannot apply cleanly is reported without
+ * having touched anything. `git apply` is otherwise all-or-nothing per file, not
+ * across the patch, so a partial failure would leave a half-applied tree.
+ */
 export function applyDiff(targetDir, diff) {
   if (!diff) return { ok: false, error: 'the bundle carries no diff' };
+
+  const here = inspectTarget(targetDir);
+  if (!here.isRepo) return { ok: false, error: 'not a git repository' };
+  if (here.dirty) {
+    return { ok: false, error: 'uncommitted changes here — commit or stash first' };
+  }
+
+  const dry = spawnSync('git', ['apply', '--3way', '--check', '-'], { cwd: targetDir, input: diff, encoding: 'utf8' });
+  if (dry.status !== 0) {
+    return { ok: false, error: (dry.stderr || 'the diff does not apply here').trim().split('\n')[0] };
+  }
+
   const res = spawnSync('git', ['apply', '--3way', '-'], { cwd: targetDir, input: diff, encoding: 'utf8' });
-  return res.status === 0
-    ? { ok: true }
-    : { ok: false, error: (res.stderr || 'git apply failed').trim().split('\n')[0] };
+  if (res.status !== 0) {
+    return { ok: false, error: (res.stderr || 'git apply failed').trim().split('\n')[0] };
+  }
+  return { ok: true, files: changedBy(targetDir) };
+}
+
+/** What the patch actually touched, so the user is told rather than guessing. */
+function changedBy(targetDir) {
+  const status = git(targetDir, ['status', '--porcelain']) ?? '';
+  return status.split('\n').filter(Boolean).map((l) => l.slice(3));
 }

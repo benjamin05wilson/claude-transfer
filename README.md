@@ -61,7 +61,17 @@ It checks Node, installs the command, adds the `/transfer` skill, and puts npm's
 global bin on your PATH if it isn't there already. Restart Claude Code
 afterwards — skills load at startup.
 
-Requires **Node 18+**. No dependencies.
+Requires **Node 18+**, and no npm dependencies.
+
+Sending through a gist — the default — also needs the
+[GitHub CLI](https://cli.github.com) installed and signed in. The installer
+checks for it. Without it, Send still works directly between two machines on the
+same network.
+
+> A gist belongs to the account that created it, so the tidy-up after collection
+> only happens when both machines are signed in as you. Sending to somebody
+> else's account works, but they cannot delete your gist — remove it yourself
+> afterwards.
 
 <br>
 

@@ -13,7 +13,9 @@
  *   claude-transfer send [session]              hand it straight to the other machine
  *                                    (--via github to go through a private gist)
  *   claude-transfer in <file|url|gh:code> [--into <dir>]  unpack it here, print the resume command
- *                                    (--sync to check out its commit, --apply-diff for its edits)
+ *                                    (--dry-run to see the import plan and write nothing)
+ *   claude-transfer sync [session]              line the working tree up with an imported session
+ *                                    (--checkout for its commit, --apply-diff for its edits)
  *   claude-transfer check <file>                inspect a bundle without unpacking it
  *   claude-transfer setup                       install the /transfer skill for Claude Code
  *
@@ -59,6 +61,7 @@ import { captureWorkspace, inspectTarget, compareWorkspace, checkout, applyDiff 
 import * as github from '../src/github.mjs';
 import { collectFolder, conflicts, MAX_FOLDER_BYTES } from '../src/folder.mjs';
 import { validateBundle } from '../src/validate.mjs';
+import { writeReceipt, readReceipt, listReceipts } from '../src/receipt.mjs';
 
 const FORMAT = 3;
 const die = (m) => { console.error(`claude-transfer: ${m}`); process.exit(1); };
@@ -316,6 +319,65 @@ function build(flags) {
 const commands = {
   __proto__: null,
 
+  /**
+   * Bring the working tree into line with an already-imported session.
+   *
+   * Separate from `in` on purpose. Telling someone to re-run the import with
+   * `--sync` could never work: a gist is consumed by the first successful
+   * receive, so there is nothing left to fetch, and even from a file it would
+   * mint a second session rather than finish the first. This works from what the
+   * import wrote down, so it needs no bundle and can be run whenever.
+   */
+  sync(flags) {
+    const wanted = flags._[0];
+    const receipts = listReceipts(claudeDir());
+
+    if (!wanted) {
+      if (!receipts.length) die('nothing has been imported on this machine yet');
+      console.log('imported sessions');
+      for (const r of receipts.slice(0, 10)) {
+        console.log(`  ${r.session.slice(0, 8)}  ${r.title ?? '(untitled)'}`);
+        console.log(`            into ${r.into}  ·  ${r.at?.slice(0, 16).replace('T', ' ')}`);
+      }
+      console.log('\nclaude-transfer sync <id> [--apply-diff]');
+      return;
+    }
+
+    const r = readReceipt(claudeDir(), wanted);
+    if (!r) die(`no imported session matching "${wanted}" — \`claude-transfer sync\` lists them`);
+    if (!r.workspace?.isRepo) {
+      die(`that session did not run in a git repository (${r.workspace?.reason ?? 'unknown'}), so there is nothing to sync`);
+    }
+
+    const here = inspectTarget(r.into);
+    const ws = compareWorkspace(r.workspace, here, r.into);
+    console.log(`session    ${r.title ?? '(untitled)'}  (${r.session.slice(0, 8)})`);
+    console.log(`directory  ${r.into}`);
+    console.log(`workspace  ${ws.summary}`);
+
+    if (!flags.checkout && !flags['apply-diff']) {
+      for (const action of ws.actions) console.log(`           ${action}`);
+      console.log('\n--checkout to move to the session\'s commit, --apply-diff to restore its edits');
+      return;
+    }
+
+    if (flags.checkout) {
+      const moved = checkout(r.into, r.workspace.head);
+      console.log(moved.ok
+        ? `checked out ${r.workspace.head.slice(0, 8)}`
+        : `could not check out: ${moved.error}`);
+      if (!moved.ok) return;
+    }
+
+    if (flags['apply-diff']) {
+      if (!r.workspace.diff) die('that session had no uncommitted changes to restore');
+      const applied = applyDiff(r.into, r.workspace.diff);
+      console.log(applied.ok
+        ? `re-applied the uncommitted changes${applied.files?.length ? ` (${applied.files.length} file(s))` : ''}`
+        : `could not apply the diff: ${applied.error}`);
+    }
+  },
+
   list() {
     const sessions = listSessions().slice(0, 25);
     if (!sessions.length) return console.log('no sessions found');
@@ -510,6 +572,49 @@ const commands = {
     const sidecarDir = join(projectsRoot(), encodeProjectDir(into), id);
     const historyDir = join(claudeDir(), 'file-history', id);
 
+    // The whole plan, before a single byte is written. Everything below is
+    // already known by this point, and someone about to let a bundle from
+    // another machine write into their project deserves to see it first rather
+    // than read about it afterwards.
+    const incomingFiles = b.folder ?? {};
+    const clashesAhead = Object.keys(incomingFiles).length ? conflicts(into, incomingFiles) : [];
+    const secretsLeft = b.redaction?.applied ? 0 : (b.redaction?.redacted ?? 0);
+
+    console.log('import plan');
+    console.log(`  session    ${b.session.title ?? '(untitled)'}`);
+    console.log(`  from       ${b.origin.host} (${b.origin.platform})  Claude Code ${b.origin.versions.join('/') || '?'}`);
+    console.log(`  into       ${into}`);
+    console.log(`  transcript ${b.transcript.length} records  ·  ${Object.keys(b.sidecars ?? {}).length} sidecars`
+      + `  ·  ${(b.prompts ?? []).length} prompts`);
+    if (valid.entries) console.log(`  expands to ${valid.entries} file(s), about ${human(valid.bytes)}`);
+    if (Object.keys(incomingFiles).length) {
+      console.log(`  files      ${Object.keys(incomingFiles).length} carried`
+        + (clashesAhead.length
+          ? `  ·  ${clashesAhead.length} already exist here and differ`
+            + (flags['overwrite-files'] ? ' — WILL BE OVERWRITTEN' : ' — will NOT be written')
+          : ''));
+    }
+    console.log(`  workspace  ${ws.summary}`);
+    console.log(`  rewind     ${ws.safeForFileHistory
+      ? `${Object.keys(b.fileHistory ?? {}).length} snapshot(s) will be restored`
+      : 'skipped — the workspace does not match, so restoring them could overwrite your work'}`);
+    console.log(`  secrets    ${b.redaction?.applied
+      ? 'redacted before sending'
+      : `carried intact${secretsLeft ? ` (${secretsLeft} credential-shaped value(s))` : ''}`}`);
+    const asks = [
+      flags.sync && ws.state === 'different-commit' ? `check out ${b.workspace?.head?.slice(0, 8)}` : null,
+      flags['apply-diff'] && b.workspace?.diff ? 'apply the uncommitted changes' : null,
+      flags['overwrite-files'] && clashesAhead.length ? `overwrite ${clashesAhead.length} existing file(s)` : null,
+    ].filter(Boolean);
+    console.log(`  will do    ${asks.length ? asks.join(', ') : 'nothing to your working tree'}`);
+
+    if (flags['dry-run']) {
+      console.log('\nnothing was written — this was a dry run.');
+      if (courier) console.log('The transfer is still on GitHub, so the same code still works.');
+      return;
+    }
+    console.log('');
+
     // Staged, then committed. Everything is built under one temporary directory
     // and moved into place only once all of it exists and the transcript has
     // been read back and found resumable. A failure part-way leaves the machine
@@ -566,6 +671,19 @@ const commands = {
 
     const nPrompts = appendHistory(join(claudeDir(), 'history.jsonl'),
       (b.prompts ?? []).map((p) => ({ ...p, sessionId: id, project: into })));
+
+    // The workspace coordinates are written down now, so they survive the
+    // bundle. `sync` can then be run days later without a code, a file, or a
+    // second import.
+    writeReceipt(claudeDir(), {
+      session: id,
+      into,
+      at: new Date().toISOString(),
+      title: b.session.title ?? null,
+      origin: { host: b.origin.host, platform: b.origin.platform, versions: b.origin.versions },
+      workspace: b.workspace ?? null,
+      redacted: Boolean(b.redaction?.applied),
+    });
 
     // Only now is the courier copy expendable: the session exists on disk and
     // has been read back.

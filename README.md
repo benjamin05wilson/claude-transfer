@@ -288,7 +288,8 @@ claude-transfer sync <session-id>                line the working tree up afterw
   --checkout                                     move to the session's commit
   --apply-diff                                   restore its uncommitted changes
 claude-transfer archive <session>                retire this side; --restore puts it back
-claude-transfer check <file> [--files]           inspect a bundle first
+claude-transfer check <file|url|gh:code>         inspect a transfer before accepting it
+claude-transfer pending [--clean]                transfers still sitting on GitHub
 claude-transfer setup                            (re)install the /transfer skill
 ```
 

@@ -18,6 +18,7 @@
  *                                    (--checkout for its commit, --apply-diff for its edits)
  *   claude-transfer archive [session]           retire a session here, so only one side stays live
  *   claude-transfer check <file>                inspect a bundle without unpacking it
+ *                                    (--force to import despite an untested Claude Code version)
  *   claude-transfer setup                       install the /transfer skill for Claude Code
  *
  * The whole conversation travels, not a summary — you reopen the same chat and
@@ -63,6 +64,7 @@ import * as github from '../src/github.mjs';
 import { collectFolder, conflicts, MAX_FOLDER_BYTES } from '../src/folder.mjs';
 import { validateBundle } from '../src/validate.mjs';
 import { writeReceipt, readReceipt, listReceipts } from '../src/receipt.mjs';
+import { assess, hereVersion } from '../src/compat.mjs';
 
 const FORMAT = 3;
 const die = (m) => { console.error(`claude-transfer: ${m}`); process.exit(1); };
@@ -606,6 +608,18 @@ const commands = {
         + (courier ? '\n\nThe transfer is still on GitHub — nothing was deleted.' : ''));
     }
 
+    // The session format belongs to Claude Code, not to this tool, and is not
+    // published as a stable interchange format. An untested pair is refused
+    // here rather than warned about after landing: a warning that arrives once
+    // the session is already on disk is advice too late to act on, whereas
+    // refusing leaves the bundle intact for a build that understands it.
+    const compat = assess({ sourceVersions: b.origin?.versions ?? [], hereVersion: hereVersion() });
+    if (!compat.ok && !flags.force) {
+      die(`${compat.summary}.\n  ${compat.detail}\n`
+        + `\n  Nothing was written${courier ? ', and the transfer is still on GitHub' : ''}.`
+        + '\n  Use --force to import anyway.');
+    }
+
     const id = newSessionId();
     const records = b.transcript.map((line) => {
       try { return JSON.parse(line); } catch { return { __raw: line }; }
@@ -660,6 +674,7 @@ const commands = {
     console.log(`  rewind     ${ws.safeForFileHistory
       ? `${Object.keys(b.fileHistory ?? {}).length} snapshot(s) will be restored`
       : 'skipped — the workspace does not match, so restoring them could overwrite your work'}`);
+    console.log(`  versions   ${compat.summary}${compat.level === 'likely' ? ' (same minor as tested)' : ''}`);
     console.log(`  secrets    ${b.redaction?.applied
       ? 'redacted before sending'
       : `carried intact${secretsLeft ? ` (${secretsLeft} credential-shaped value(s))` : ''}`}`);
@@ -793,10 +808,6 @@ const commands = {
     }
 
     if (!b.redaction.applied) console.log('\nnote: this bundle carries the transcript intact, secrets and all');
-    const mine = process.env.CLAUDE_CODE_VERSION;
-    if (mine && b.origin.versions.length && !b.origin.versions.includes(mine)) {
-      console.log(`note: written by Claude Code ${b.origin.versions.join('/')}, you are on ${mine}`);
-    }
     // `/resume` lists the sessions belonging to the directory it is running in,
     // and it reads them off disk each time — so a session that lands in the
     // wrong directory is invisible even though the import succeeded. If a

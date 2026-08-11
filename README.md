@@ -242,6 +242,33 @@ a code from wherever you got it:
 </details>
 
 <details>
+<summary><b>Which Claude Code versions this works with</b></summary>
+
+<br>
+
+| | |
+|---|---|
+| **Verified** | Claude Code **2.1.226** — reverse-engineered and tested end to end |
+| **Expected to work** | any **2.1.x**, on the assumption a patch release does not restructure the format |
+| **Refused** | anything else, unless you pass `--force` |
+
+This writes into Claude Code's own on-disk session format. That format is
+documented as *existing* — transcripts live under `~/.claude/projects` — but it
+is not published as a stable interchange format, and nothing promises it will
+not change.
+
+So the version is part of the contract rather than a footnote. A bundle records
+the version that wrote it, an import records the version reading it, and an
+untested pair is **refused rather than warned about**. A warning printed once the
+session has already landed is advice arriving too late to act on; refusing leaves
+the bundle intact for a build that understands it.
+
+`--force` exists because being stuck holding a bundle with no way to open it is
+worse than a documented risk knowingly taken.
+
+</details>
+
+<details>
 <summary><b>The CLI underneath</b></summary>
 
 <br>

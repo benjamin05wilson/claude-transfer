@@ -18,7 +18,8 @@
  *                                    (--checkout for its commit, --apply-diff for its edits)
  *   claude-transfer archive [session]           retire a session here, so only one side stays live
  *   claude-transfer check <file|url|gh:code>    inspect a transfer without accepting it
- *   claude-transfer pending [--clean]           transfers of yours still sitting on GitHub
+ *   claude-transfer pending [--clean --yes]     transfers of yours still sitting on GitHub
+ *                                    (--older-than <days> to narrow it)
  *                                    (--force to import despite an untested Claude Code version)
  *   claude-transfer setup                       install the /transfer skill for Claude Code
  *
@@ -453,11 +454,23 @@ const commands = {
    * account indefinitely, and nothing else was ever going to clear them up.
    */
   pending(flags) {
+    // Arguments are checked before anything is fetched. `Number('nope')` is NaN
+    // and every comparison against NaN is false, so an unparseable age silently
+    // skipped the age check and `--clean` deleted everything — the opposite of
+    // what someone narrowing a deletion asked for. Validating after the early
+    // return meant a bad value was never even noticed when nothing was pending.
+    const raw = strFlag(flags, 'older-than', '0');
+    // `Number('')` is 0, so an empty value would quietly mean "no age filter" —
+    // the same silent widening, arrived at a different way.
+    const days = String(raw).trim() === '' ? NaN : Number(raw);
+    if (!Number.isFinite(days) || days < 0) {
+      die(`--older-than needs a number of days, got ${JSON.stringify(raw)}`);
+    }
+    const cutoff = Date.now() - days * 86_400_000;
+
     const open = github.pending();
     if (!open.length) return console.log('no uncollected transfers');
 
-    const days = Number(strFlag(flags, 'older-than', '0'));
-    const cutoff = Date.now() - days * 86_400_000;
 
     console.log(`${open.length} uncollected transfer${open.length === 1 ? '' : 's'}`);
     for (const g of open) console.log(`  ${g.id.slice(0, 12)}  ${g.description}`);
@@ -465,6 +478,14 @@ const commands = {
     if (!flags.clean) {
       console.log('\nThese are encrypted and private. `--clean` deletes them,');
       console.log('`--clean --older-than 7` only the ones older than a week.');
+      return;
+    }
+
+    // Deleting every uncollected transfer is not something to do because a flag
+    // was typed once. Narrowing by age is itself a statement of intent, so that
+    // case stands on its own; deleting the lot is not.
+    if (days === 0 && !flags.yes) {
+      console.log(`\nThis would delete all ${open.length}. Re-run with --yes, or narrow it with --older-than <days>.`);
       return;
     }
 

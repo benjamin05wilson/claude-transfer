@@ -22,8 +22,12 @@ const file = (claudeDir, id) => join(dir(claudeDir), `${id}.json`);
  *                          workspace the session was originally working in
  */
 export function writeReceipt(claudeDir, receipt) {
-  mkdirSync(dir(claudeDir), { recursive: true });
-  writeFileSync(file(claudeDir, receipt.session), JSON.stringify(receipt, null, 2));
+  // A receipt names a working directory, a branch and a commit, and sits in a
+  // home directory that may be shared. Owner-only is the right default for
+  // anything describing somebody's work; the modes are set explicitly rather
+  // than left to whatever umask happens to be.
+  mkdirSync(dir(claudeDir), { recursive: true, mode: 0o700 });
+  writeFileSync(file(claudeDir, receipt.session), JSON.stringify(receipt, null, 2), { mode: 0o600 });
   return file(claudeDir, receipt.session);
 }
 

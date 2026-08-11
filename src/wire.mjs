@@ -170,6 +170,36 @@ export function serveOnce(payload, { port = 0, timeout = 10 * 60_000, host } = {
 }
 
 /** Collect a bundle another machine is serving, and decrypt it. */
+/**
+ * Read a response body, refusing it the moment it exceeds the cap.
+ *
+ * The declared content-length is a claim by whoever is on the other end, and
+ * this accepts a URL the user pasted from anywhere. What is actually received
+ * is the only thing worth trusting, so it is counted as it arrives and the
+ * connection is dropped as soon as the total is too large — rather than
+ * discovering it after the whole body is already in memory.
+ */
+async function readCapped(res, maxBytes) {
+  if (!res.body) {
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > maxBytes) throw new Error('refusing a transfer larger than the limit');
+    return buf;
+  }
+
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of res.body) {
+    total += chunk.length;
+    if (total > maxBytes) {
+      // Stop pulling; the sender does not get to decide how much we hold.
+      await res.body.cancel?.().catch(() => {});
+      throw new Error(`refusing a transfer over ${Math.round(maxBytes / 1048576)} MB`);
+    }
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks, total);
+}
+
 export async function collect(fullUrl, { timeout = 60_000, maxBytes = MAX_BUNDLE_BYTES } = {}) {
   const { url, key } = splitUrl(fullUrl);
   if (!key) throw new Error('that link has no key on the end — copy the whole line, including the # part');
@@ -186,8 +216,11 @@ export async function collect(fullUrl, { timeout = 60_000, maxBytes = MAX_BUNDLE
       throw new Error(`refusing a ${Math.round(declared / 1048576)} MB transfer`);
     }
 
-    const blob = Buffer.from(await res.arrayBuffer());
-    if (blob.length > maxBytes) throw new Error('transfer larger than expected, refusing it');
+    // Read incrementally and stop the moment the cap is passed. `arrayBuffer()`
+    // buffers the entire response before anything can be checked, so a server
+    // that omits or lies about content-length could hand over as much as it
+    // liked — the check afterwards happens once the memory is already spent.
+    const blob = await readCapped(res, maxBytes);
     return decrypt(blob, key);
   } catch (err) {
     if (err.name === 'AbortError') throw new Error(`no answer from ${url} — same network?`);

@@ -234,11 +234,11 @@ export function redactValue(value, ctx) {
  * Redact a whole transcript.
  * @param {object[]} records  parsed .jsonl records
  */
-export function redactTranscript(records, { home, allow = [], seen = new Map(), scanOnly = false } = {}) {
+export function redactTranscript(records, { home, allow = [], seen = new Map(), scanOnly = false, context = false } = {}) {
   // `seen` is threaded in so the transcript and the sidecars share one numbering.
   // With separate maps, two *different* secrets both render as `‹key:1›`, which
   // breaks the stability contract and misleads whoever reads the result.
-  const ctx = { allow, seen, scanOnly, findings: [] };
+  const ctx = { allow, seen, scanOnly, context, findings: [] };
   let pathCount = 0;
 
   const redacted = records.map((record) => {
@@ -252,7 +252,10 @@ export function redactTranscript(records, { home, allow = [], seen = new Map(), 
     return clean;
   });
 
-  return { records: redacted, report: summarise(ctx.findings, pathCount) };
+  // The findings themselves come back too, not just the tally. --preview needs
+  // the individual hits and their surrounding text, and a summary cannot be
+  // un-summarised.
+  return { records: redacted, report: summarise(ctx.findings, pathCount), findings: ctx.findings };
 }
 
 /** Counts only — a report that printed the secret would defeat its own purpose. */

@@ -124,13 +124,13 @@ function runningSessions() {
 }
 
 /** Redact and de-personalise the sidecar files — they are transcripts too. */
-function cleanFiles(files, { home, seen, findings, scanOnly = true }) {
+function cleanFiles(files, { home, seen, findings, scanOnly = true, context = false }) {
   const out = {};
   let paths = 0;
   for (const [rel, b64] of Object.entries(files)) {
     const buf = Buffer.from(b64, 'base64');
     if (!isTextish(buf)) { out[rel] = b64; continue; }
-    const { text, findings: found } = redactText(buf.toString('utf8'), { seen, scanOnly });
+    const { text, findings: found } = redactText(buf.toString('utf8'), { seen, scanOnly, context });
     findings.push(...found);
     const portable = portablePaths(text, home);
     paths += portable.count;
@@ -162,14 +162,17 @@ function build(flags) {
   const redacting = flags.redact === true;
   const seen = new Map();
   const findings = [];
-  const scanOpts = { home: homedir(), seen, scanOnly: !redacting };
+  // --preview asks for the surrounding text of each hit, which costs nothing
+  // when it is not requested and was simply never switched on.
+  const wantContext = flags.preview === true;
+  const scanOpts = { home: homedir(), seen, scanOnly: !redacting, context: wantContext };
 
   const done = redactTranscript(kept, scanOpts);
   const transcript = done.records;
   let report = done.report;
 
-  const a = cleanFiles(packDir(paths.sidecars), { home: homedir(), seen, findings, scanOnly: !redacting });
-  const b = cleanFiles(packDir(paths.fileHistory), { home: homedir(), seen, findings, scanOnly: !redacting });
+  const a = cleanFiles(packDir(paths.sidecars), { home: homedir(), seen, findings, scanOnly: !redacting, context: wantContext });
+  const b = cleanFiles(packDir(paths.fileHistory), { home: homedir(), seen, findings, scanOnly: !redacting, context: wantContext });
   const sidecars = a.files;
   const history = b.files;
 
@@ -229,11 +232,6 @@ function build(flags) {
   if (!redacting && report.redacted) {
     console.log('  (left intact — this is your data. `--redact` replaces it, irreversibly)');
   }
-  if (flags.preview) {
-    for (const f of findings.filter((x) => x.context).slice(0, 40)) {
-      console.log(`    ${f.label}: ${f.context.slice(0, 100)}`);
-    }
-  }
 
   const bundle = {
     format: FORMAT,
@@ -258,7 +256,7 @@ function build(flags) {
   // and the working folder all arrive after the transcript has been scrubbed —
   // and redacting the transcript alone shipped the same key in four other places
   // under a label that said the bundle was safe.
-  const sweep = redactBundle(bundle, { seen, scanOnly: !redacting });
+  const sweep = redactBundle(bundle, { seen, scanOnly: !redacting, context: wantContext });
   const swept = sweep.findings.filter((f) => !f.fake);
 
   if (sweep.remotesStripped) {
@@ -277,6 +275,23 @@ function build(flags) {
       + `${sweep.binaries.slice(0, 3).join(', ')}${sweep.binaries.length > 3 ? ' …' : ''}`);
     if (redacting) {
       console.log('          they travel byte for byte — redaction cannot reach inside them');
+    }
+  }
+
+  // --preview, over everything: the transcript, the sidecars, and the fields
+  // swept from the assembled bundle. It used to read only the sidecar findings,
+  // and no call ever asked for context, so it printed nothing at all.
+  if (wantContext) {
+    const all = [...(done.findings ?? []), ...findings, ...sweep.findings]
+      .filter((f) => f.context && !f.fake);
+    if (!all.length) {
+      console.log('preview   nothing to show — no credential-shaped values found');
+    } else {
+      console.log(`preview   ${all.length} hit(s), value masked:`);
+      for (const f of all.slice(0, 40)) {
+        console.log(`    ${f.label}${f.where ? ` (${f.where})` : ''}: ${f.context.slice(0, 100)}`);
+      }
+      if (all.length > 40) console.log(`    …and ${all.length - 40} more`);
     }
   }
 

@@ -81,7 +81,7 @@ const fileMaps = (bundle) => [
  *
  * @returns {{findings:Array, binaries:Array<string>, remotesStripped:number}}
  */
-export function redactBundle(bundle, { seen = new Map(), scanOnly = false } = {}) {
+export function redactBundle(bundle, { seen = new Map(), scanOnly = false, context = false } = {}) {
   const findings = [];
   const binaries = [];
   let remotesStripped = 0;
@@ -95,7 +95,7 @@ export function redactBundle(bundle, { seen = new Map(), scanOnly = false } = {}
   for (const { label, get, set } of textFields(bundle)) {
     const value = get();
     if (typeof value !== 'string' || !value) continue;
-    const out = redactText(value, { seen, scanOnly });
+    const out = redactText(value, { seen, scanOnly, context });
     findings.push(...out.findings.map((f) => ({ ...f, where: label })));
     if (!scanOnly) set(out.text);
   }
@@ -112,7 +112,7 @@ export function redactBundle(bundle, { seen = new Map(), scanOnly = false } = {}
         continue;
       }
 
-      const out = redactText(buf.toString('utf8'), { seen, scanOnly });
+      const out = redactText(buf.toString('utf8'), { seen, scanOnly, context });
       findings.push(...out.findings.map((f) => ({ ...f, where: `${name}:${rel}` })));
       if (!scanOnly && out.findings.some((f) => !f.fake)) {
         map[rel] = Buffer.from(out.text, 'utf8').toString('base64');

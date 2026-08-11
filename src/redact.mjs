@@ -135,6 +135,28 @@ const FAKE_ANYWHERE = /EXAMPLE|PLACEHOLDER|REDACTED|YOUR_|_HERE\b/i;
 const isProbablyFake = (value) => LOOKS_FAKE.test(value) || FAKE_ANYWHERE.test(value);
 
 /** Stable per-value so the same secret reads as the same token throughout. */
+/**
+ * The shape a placeholder takes, so one is never mistaken for a secret.
+ *
+ * Rules run in sequence over the same text, so a value replaced by an earlier
+ * rule is still sitting there when a later one looks. `secret=sk-ant-…` was
+ * caught by the specific Anthropic rule, and the generic assigned-secret rule
+ * then read the resulting `secret=‹anthropic-key:1›` as another credential and
+ * replaced it again. Redacting twice produced different output, and the
+ * verification pass — which rescans the finished bundle — reported values still
+ * present and refused the export.
+ *
+ * That failed safely, in that nothing leaked, but it made `--redact` unusable
+ * for one of the most ordinary secret formats there is.
+ *
+ * Matched anywhere in the value rather than anchored: a rule's match usually
+ * carries its assignment with it, so what needs recognising is
+ * `secret=‹anthropic-key:1›` rather than the bare placeholder.
+ */
+export const PLACEHOLDER = /‹[a-z0-9-]+:\d+›/i;
+
+export const isRedacted = (value) => PLACEHOLDER.test(String(value ?? ''));
+
 function placeholderFor(rule, value, seen) {
   if (!seen.has(value)) seen.set(value, seen.size + 1);
   return `‹${rule.id}:${seen.get(value)}›`;
@@ -184,6 +206,11 @@ export function redactText(text, { allow = [], seen = new Map(), context = false
   for (const rule of RULES) {
     if (allow.includes(rule.id)) continue;
     out = out.replace(rule.re, (match, ...rest) => {
+      // Already redacted by an earlier rule. Replacing it again would make the
+      // output depend on rule order and leave the verification pass reporting
+      // secrets that are only placeholders.
+      if (isRedacted(match)) return match;
+
       // A rule may look past the match itself before deciding.
       if (rule.guard && !rule.guard(match)) return match;
 

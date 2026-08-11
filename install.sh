@@ -56,7 +56,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
   if command -v claude-transfer >/dev/null 2>&1; then
     claude-transfer setup --uninstall >/dev/null 2>&1 && ok "removed the /transfer skill" || warn "no skill to remove"
   fi
-  npm uninstall -g claude-transfer-session >/dev/null 2>&1 && ok "uninstalled the claude-transfer command" || warn "claude-transfer was not installed globally"
+  npm uninstall -g claude-transfer >/dev/null 2>&1 && ok "uninstalled the claude-transfer command" || warn "claude-transfer was not installed globally"
   say ""
   say "Sessions you already imported are untouched — they are just Claude Code sessions now."
   exit 0

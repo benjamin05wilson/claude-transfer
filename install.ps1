@@ -40,7 +40,7 @@ if ($Uninstall) {
   if (Get-Command claude-transfer -ErrorAction SilentlyContinue) {
     try { claude-transfer setup --uninstall | Out-Null; Ok "removed the /transfer skill" } catch { Warn "no skill to remove" }
   }
-  try { npm uninstall -g claude-transfer-session 2>&1 | Out-Null; Ok "uninstalled the claude-transfer command" }
+  try { npm uninstall -g claude-transfer 2>&1 | Out-Null; Ok "uninstalled the claude-transfer command" }
   catch { Warn "claude-transfer was not installed globally" }
   Say ""
   Say "Sessions you already imported are untouched - they are just Claude Code sessions now."

@@ -1,10 +1,21 @@
+<div align="center">
+
 # claude-transfer
 
 **Move a Claude Code session to another computer and carry on there.**
 
+[![MIT](https://img.shields.io/badge/licence-MIT-1c6ea4?style=flat-square)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A518-1c6ea4?style=flat-square)](https://nodejs.org)
+[![Platforms](https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-1c6ea4?style=flat-square)](#install)
+[![Dependencies](https://img.shields.io/badge/dependencies-none-2f7d5d?style=flat-square)](package.json)
+
+</div>
+
+<br>
+
 Claude Code can pull a session down from the web to your terminal. It can't move
-one from your laptop to your desktop. [The docs are
-explicit](https://code.claude.com/docs/en/remote-control):
+one from your laptop to your desktop.
+[The docs are explicit](https://code.claude.com/docs/en/remote-control):
 
 > You can pull a web session down to your terminal, but you cannot push an
 > existing local session up to the web.
@@ -12,18 +23,25 @@ explicit](https://code.claude.com/docs/en/remote-control):
 This is the missing direction. The whole conversation moves — not a summary.
 Same chat, same history, same place in it.
 
+<br>
+
 ```
-  MacBook                              Windows desktop
-  ───────────────────────────────      ──────────────────────────────────
-  /transfer  →  Send                   /transfer  →  Receive
-                                       ┌ paste the code
-  gh:b1e7286c…#6bdfc9af26e945cb…  ───► └ landed.
-                                         "Discuss implementation approach"
-  2.2 MB · 6 parts · encrypted           is in /resume now.
+  MacBook                                Windows desktop
+  ─────────────────────────────────      ─────────────────────────────────
+  /transfer  →  Send                     /transfer  →  Receive
+                                          ┌ paste the code
+  gh:b1e7286c…#6bdfc9af26e945cb…   ────►  └ landed.
+                                            "Discuss implementation approach"
+  2.2 MB · 6 parts · encrypted                is in /resume now.
 ```
 
-Different OS, different username, different path root, over the internet.
-Then `/resume` on the far side and it knows exactly where you left off.
+<div align="center"><sub>
+
+Different OS · different username · different path root · over the internet
+
+</sub></div>
+
+<br>
 
 ---
 
@@ -34,50 +52,70 @@ On each machine:
 ```bash
 git clone https://github.com/benjamin05wilson/claude-transfer
 cd claude-transfer
+
 ./install.sh          # macOS, Linux
 .\install.ps1         # Windows
 ```
 
-Checks Node, installs the command, adds the `/transfer` skill, and fixes your
-PATH if npm's global bin isn't on it. Restart Claude Code afterwards — skills
-load at startup.
+It checks Node, installs the command, adds the `/transfer` skill, and puts npm's
+global bin on your PATH if it isn't there already. Restart Claude Code
+afterwards — skills load at startup.
 
-Node ≥ 18. No dependencies.
+Requires **Node 18+**. No dependencies.
+
+<br>
 
 ## Use it
 
-Type **`/transfer`** and pick **Send** or **Receive**. That's the whole
-interface — there's a CLI underneath, but you shouldn't need it.
+Type **`/transfer`** and pick **Send** or **Receive**.
 
-Send gives you a code. Paste it on the other machine. Done.
+Send gives you a code. Paste it on the other machine. The session is in
+`/resume` within seconds — no restart.
+
+That's the whole interface. There's a CLI underneath doing the work, but you
+shouldn't need to touch it.
+
+<br>
 
 ## Where it fits
 
-| you want to | use |
+|  | |
 |---|---|
 | pick up a **web** session in your terminal | `/teleport` — built in |
 | drive a **local** session from your phone | `/remote-control` — built in |
-| **move a local session to another computer** | `/transfer` — this |
+| **move a local session to another computer** | **`/transfer`** — this |
+
+<br>
 
 ## How it travels
 
-Through a **private gist** by default, which means two useful things: it works
-from any network, and **both machines never need to be awake at the same time**.
-Close the laptop, collect it on the desktop tomorrow.
+Through a **private gist** by default. Two useful consequences: it works from
+any network, and **both machines never need to be awake at the same time** —
+close the laptop, collect it on the desktop tomorrow.
 
-On the same network it can go direct instead — peer-to-peer, one-shot, nothing
-in the middle.
+On the same network it can go direct instead: peer-to-peer, one-shot, nothing in
+the middle.
 
-Either way the bundle is encrypted before it leaves. The key rides in the part
-of the code after `#`, which is never uploaded, so a leaked gist is an opaque
-blob. It's deleted the moment it's collected.
+Either way the bundle is **encrypted before it leaves**. The key rides in the
+part of the code after `#`, which is never uploaded, so a leaked gist is an
+opaque blob. It's deleted the moment it's collected.
 
-## What actually moves
+> Very large sessions can exceed what a gist will hold. Those go as a file
+> instead, moved however you like.
+
+<br>
+
+---
+
+<details>
+<summary><b>What actually moves</b></summary>
+
+<br>
 
 A Claude Code session is four things on disk, all keyed to a session id and an
 absolute path:
 
-| | |
+|  |  |
 |---|---|
 | `projects/<cwd>/<id>.jsonl` | the conversation, and the records `/resume` reads for its title |
 | `projects/<cwd>/<id>/` | subagents, workflows, tool results |
@@ -85,14 +123,22 @@ absolute path:
 | `history.jsonl` | ↑ prompt recall |
 
 Move that naively and you get a conversation full of directories that don't
-exist, on a machine with a different username. So an import mints a **new session
-id** — the original still belongs to the sending machine — and rewrites it
-everywhere, along with every path, in both the raw and JSON-escaped spellings a
-Windows path takes. Two record types are deliberately left behind: one points
-into the sender's temp directory, the other ties the session to a cloud session
-that isn't the receiving machine's to inherit.
+exist, on a machine with a different username.
 
-## It brings the work, not just the chat
+So an import mints a **new session id** — the original still belongs to the
+sending machine — and rewrites it everywhere, along with every path, in both the
+raw and JSON-escaped spellings a Windows path takes.
+
+Two record types are deliberately left behind: one points into the sender's temp
+directory, the other ties the session to a cloud session that isn't the
+receiving machine's to inherit.
+
+</details>
+
+<details>
+<summary><b>It brings the work, not just the chat</b></summary>
+
+<br>
 
 A transcript full of `src/App.tsx` is useless in a directory that has none. So a
 bundle records where the work was — remote, branch, commit, uncommitted changes
@@ -107,7 +153,7 @@ flight. Both refuse when you have uncommitted work of your own.
 
 **Rewind data is gated on that comparison.** Another machine's undo snapshots
 restored into a different checkout would let `/rewind` write foreign content over
-your files, so when the workspace doesn't match they're skipped and you're told
+your files, so when the workspace doesn't match they're skipped — and you're told
 why.
 
 When the far machine can't fetch the repo at all — private and unconfigured
@@ -115,7 +161,12 @@ there, or never a repo — it can carry the files themselves. **Tracked files
 only**: `.gitignore` already records what you decided not to commit, so your
 `.env`, your keys and your `node_modules` stay put.
 
-## Secrets
+</details>
+
+<details>
+<summary><b>Secrets</b></summary>
+
+<br>
 
 **The transcript travels intact, and you're told what's in it.**
 
@@ -133,18 +184,22 @@ contains
 ```
 
 Redaction is there for when it's warranted — a file that might travel, or a
-session going to someone who isn't you — and you can preview each hit in context
-with the value masked.
+session going to someone who isn't you — and each hit can be previewed in
+context with the value masked.
 
-**What it will miss:** a password shaped like a variable name, such as
-`myDogRex2024`, reads as code and is left alone. The rule is deliberately narrow,
-because a looser one corrupts ordinary source like `password: string`. Treat the
-scan as a reason to look, not a guarantee.
+The detector is deliberately narrow, because a looser one corrupts ordinary
+source like `password: string`. Treat the scan as a reason to look rather than a
+guarantee.
 
-## Trust
+</details>
 
-The wire is AES-256-GCM, with the key in the URL fragment — a part no HTTP client
-transmits, so it stays on the two machines.
+<details>
+<summary><b>Trust</b></summary>
+
+<br>
+
+The wire is **AES-256-GCM**, with the key in the URL fragment — a part no HTTP
+client transmits, so it stays on the two machines.
 
 Everything else assumes a bundle may be hostile, because `/transfer` will accept
 a code from wherever you got it:
@@ -158,10 +213,15 @@ a code from wherever you got it:
 - The direct server binds one address rather than every interface, and gives up
   after 20 wrong guesses.
 
-## Underneath
+</details>
 
-`/transfer` drives a small CLI. You aren't meant to type it, but it's there when
-Claude Code isn't:
+<details>
+<summary><b>The CLI underneath</b></summary>
+
+<br>
+
+`/transfer` drives a small command. You aren't meant to type it, but it's there
+when Claude Code isn't:
 
 ```
 claude-transfer list                             sessions here, newest first
@@ -175,17 +235,14 @@ claude-transfer check <file> [--files]           inspect a bundle first
 claude-transfer setup                            (re)install the /transfer skill
 ```
 
-## Known limits
+</details>
 
-- **Gists cap around 40 MB.** A very large session should go as a file instead.
-- **A private gist belongs to one account**, so this moves sessions between *your*
-  machines. Sending to another person needs a different drop box.
-- **Both machines need `claude-transfer` installed.** The slash command is the
-  interface, but the install is still a per-machine step.
-- **Windows is tested but newer than the rest.** It was the machine that found
-  the last three bugs, which is either reassuring or not, depending on your
-  temperament.
+<br>
 
-## Licence
+---
 
-MIT
+<div align="center"><sub>
+
+MIT · built with [Claude Code](https://claude.com/claude-code)
+
+</sub></div>

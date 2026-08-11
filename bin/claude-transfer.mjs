@@ -17,7 +17,8 @@
  *   claude-transfer sync [session]              line the working tree up with an imported session
  *                                    (--checkout for its commit, --apply-diff for its edits)
  *   claude-transfer archive [session]           retire a session here, so only one side stays live
- *   claude-transfer check <file>                inspect a bundle without unpacking it
+ *   claude-transfer check <file|url|gh:code>    inspect a transfer without accepting it
+ *   claude-transfer pending [--clean]           transfers of yours still sitting on GitHub
  *                                    (--force to import despite an untested Claude Code version)
  *   claude-transfer setup                       install the /transfer skill for Claude Code
  *
@@ -442,6 +443,43 @@ const commands = {
     console.log(`restore it with:  claude-transfer archive --restore ${session.id}`);
   },
 
+  /**
+   * Transfers of yours still sitting on GitHub.
+   *
+   * A gist is deleted when it is collected, so anything listed here was never
+   * picked up: a send that went to the wrong machine, a code that was lost, an
+   * import that failed. They are encrypted and private, so this is untidiness
+   * rather than exposure — but they are still your sessions, sitting in your
+   * account indefinitely, and nothing else was ever going to clear them up.
+   */
+  pending(flags) {
+    const open = github.pending();
+    if (!open.length) return console.log('no uncollected transfers');
+
+    const days = Number(strFlag(flags, 'older-than', '0'));
+    const cutoff = Date.now() - days * 86_400_000;
+
+    console.log(`${open.length} uncollected transfer${open.length === 1 ? '' : 's'}`);
+    for (const g of open) console.log(`  ${g.id.slice(0, 12)}  ${g.description}`);
+
+    if (!flags.clean) {
+      console.log('\nThese are encrypted and private. `--clean` deletes them,');
+      console.log('`--clean --older-than 7` only the ones older than a week.');
+      return;
+    }
+
+    let gone = 0;
+    for (const g of open) {
+      // Best effort per gist: one failure should not abandon the rest.
+      if (days > 0) {
+        const when = Date.parse(g.raw?.split('\t').pop() ?? '');
+        if (Number.isFinite(when) && when > cutoff) continue;
+      }
+      if (github.remove(g.id)) gone++;
+    }
+    console.log(`\ndeleted ${gone} of ${open.length}`);
+  },
+
   list() {
     const sessions = listSessions().slice(0, 25);
     if (!sessions.length) return console.log('no sessions found');
@@ -547,8 +585,35 @@ const commands = {
       : '\nType /transfer in Claude Code.');
   },
 
-  check(flags) {
-    const b = load(flags._[0]);
+  /**
+   * Inspect a bundle without accepting it.
+   *
+   * Takes anything `in` takes — a file, a URL, or a gh: code — because the one
+   * moment inspection is worth having is when somebody has sent you a code and
+   * you do not yet know what is in it. Restricting this to files meant it could
+   * only be used on bundles you had already made yourself.
+   *
+   * Nothing is written and, for a gh: code, nothing is consumed: the transfer is
+   * still collectable afterwards.
+   */
+  async check(flags) {
+    const source = flags._[0];
+    if (!source) die('need a bundle file, a claude-transfer URL, or a gh: code');
+
+    let b;
+    if (github.looksLikeGhCode(source)) {
+      const code = github.parseCode(source);
+      if (!code) die('that gh: code looks malformed — copy the whole thing, including the # part');
+      if (!code.key) die('that code has no key on the end — copy the whole line, including the # part');
+      b = parseBundle(decrypt(await github.get(code.id), code.key));
+      console.log('source     a GitHub transfer — still there, this did not collect it');
+    } else if (looksLikeUrl(source)) {
+      b = parseBundle(await collect(source));
+      console.log('source     a direct transfer — note this DOES consume it, it is one-shot');
+    } else {
+      b = load(source);
+    }
+
     console.log(`format     ${b.format}`);
     console.log(`created    ${b.created}`);
     console.log(`origin     ${b.origin.host} (${b.origin.platform})  Claude Code ${b.origin.versions.join('/') || '?'}`);
@@ -557,6 +622,9 @@ const commands = {
     console.log(`carries    ${b.session.records} records  ·  ${Object.keys(b.sidecars ?? {}).length} sidecars`
       + `  ·  ${Object.keys(b.fileHistory ?? {}).length} history files  ·  ${(b.prompts ?? []).length} prompts`);
     console.log(`redacted   ${b.redaction.applied ? `${b.redaction.redacted} secrets, ${b.redaction.pathsRewritten} paths` : 'NO — raw bundle'}`);
+
+    const verdict = assess({ sourceVersions: b.origin?.versions ?? [], hereVersion: hereVersion() });
+    console.log(`versions   ${verdict.summary}${verdict.ok ? '' : ' — `in` will refuse this without --force'}`);
 
     // A count is not an inspection. Show the paths, because these are the files
     // the bundle will write on this machine, and flag any that try to escape.

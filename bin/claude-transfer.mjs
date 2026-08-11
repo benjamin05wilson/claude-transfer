@@ -278,6 +278,19 @@ function build(flags) {
       : `also      ${swept.length} secret(s) in ${where.join(', ')}`);
   }
 
+  // The count in the bundle is written before the sweep runs, so it only ever
+  // described the transcript — a bundle could say "1 secret" while the sweep had
+  // just handled four more in the diff, the prompts and the carried folder. The
+  // number a reader sees should be the number of things that were found.
+  bundle.redaction = {
+    ...bundle.redaction,
+    redacted: (bundle.redaction?.redacted ?? 0) + swept.length,
+    inTranscript: bundle.redaction?.redacted ?? 0,
+    inBundle: swept.length,
+    binaries: sweep.binaries.length,
+    remotesStripped: sweep.remotesStripped,
+  };
+
   if (sweep.binaries.length) {
     console.log(`binary    ${sweep.binaries.length} file(s) cannot be scanned or redacted: `
       + `${sweep.binaries.slice(0, 3).join(', ')}${sweep.binaries.length > 3 ? ' …' : ''}`);
@@ -433,10 +446,11 @@ const commands = {
     const records = readTranscript(session.path);
     const title = records.find((r) => r.type === 'ai-title')?.aiTitle ?? null;
 
-    mkdirSync(dir, { recursive: true });
+    // An archived session is a whole conversation. Owner-only, explicitly.
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(join(dir, `${session.id}.json`), JSON.stringify({
       id: session.id, path: session.path, title, at: new Date().toISOString(),
-    }, null, 2));
+    }, null, 2), { mode: 0o600 });
     renameSync(session.path, join(dir, `${session.id}.jsonl`));
 
     console.log(`archived  ${title ?? '(untitled)'}  (${session.id.slice(0, 8)})`);
@@ -635,6 +649,17 @@ const commands = {
       b = load(source);
     }
 
+    // Validated before any field is read. `check` is the command people run on
+    // something they do not trust, so it must not be the one that dereferences
+    // a malformed bundle and dies with a type error instead of an explanation.
+    const shape = validateBundle(b, { maxFormat: FORMAT, into: null });
+    if (!shape.ok) {
+      console.log('this bundle is malformed:');
+      for (const e of shape.errors) console.log(`  ${e}`);
+      console.log('\n`claude-transfer in` will refuse it.');
+      return;
+    }
+
     console.log(`format     ${b.format}`);
     console.log(`created    ${b.created}`);
     console.log(`origin     ${b.origin.host} (${b.origin.platform})  Claude Code ${b.origin.versions.join('/') || '?'}`);
@@ -649,13 +674,23 @@ const commands = {
 
     // A count is not an inspection. Show the paths, because these are the files
     // the bundle will write on this machine, and flag any that try to escape.
-    const keys = [...Object.keys(b.sidecars ?? {}), ...Object.keys(b.fileHistory ?? {})];
+    // The carried folder belongs in here too: those are the entries that land in
+    // the user's own project rather than under ~/.claude, so they are the ones
+    // most worth seeing before accepting anything.
+    const keys = [
+      ...Object.keys(b.sidecars ?? {}),
+      ...Object.keys(b.fileHistory ?? {}),
+      ...Object.keys(b.folder ?? {}),
+    ];
     const hostile = keys.filter((k) => !safeEntryPath('/probe', k));
     if (hostile.length) {
       console.log(`\n⚠  ${hostile.length} entr${hostile.length === 1 ? 'y' : 'ies'} would write OUTSIDE the target directory:`);
       for (const k of hostile.slice(0, 10)) console.log(`     ${k}`);
       console.log('   `claude-transfer in` will refuse this bundle. Do not trust its source.');
       return;
+    }
+    if (Object.keys(b.folder ?? {}).length) {
+      console.log(`carries    ${Object.keys(b.folder).length} working file(s) that land in your project`);
     }
     if (flags.files && keys.length) {
       console.log('\nfiles it would write:');
@@ -687,7 +722,10 @@ const commands = {
     }
 
     const into = resolve(strFlag(flags, 'into', process.cwd()));
-    mkdirSync(into, { recursive: true });
+    // Not created yet: a dry run reports that nothing was written, and creating
+    // a directory is a change. It happens once the import is actually going
+    // ahead, just below.
+    if (!flags['dry-run']) mkdirSync(into, { recursive: true });
 
     // Everything checkable is checked before anything is written, so a bad
     // bundle is refused whole rather than discovered halfway through.
@@ -791,7 +829,8 @@ const commands = {
     let skippedHist = 0;
 
     try {
-      mkdirSync(staging, { recursive: true });
+      // The staging directory briefly holds the entire transcript.
+      mkdirSync(staging, { recursive: true, mode: 0o700 });
       const stagedTranscript = join(staging, 'transcript.jsonl');
       const stagedSidecars = join(staging, 'sidecars');
       const stagedHistory = join(staging, 'file-history');

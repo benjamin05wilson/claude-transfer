@@ -141,8 +141,16 @@ test('the transcript is re-homed to the receiving directory', () => {
     const landed = /landed\s+(\S+)/.exec(said)?.[1];
     assert.ok(landed && existsSync(landed));
 
-    const body = readFileSync(landed, 'utf8');
-    assert.ok(body.includes(box.work), 'records point at the receiving directory');
-    assert.ok(!body.includes('‹home›'), 'the portable home marker is resolved, not left in place');
+    // Parsed, not string-matched. A transcript is JSON, so a Windows path is
+    // stored escaped (`C:\\Users\\…`) while the path itself has single
+    // separators — comparing raw text passes on POSIX and fails on Windows
+    // without either result saying anything about whether re-homing worked.
+    const records = readFileSync(landed, 'utf8')
+      .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+
+    const cwds = [...new Set(records.map((r) => r.cwd).filter(Boolean))];
+    assert.deepEqual(cwds, [box.work], 'every record points at the receiving directory');
+    assert.ok(!readFileSync(landed, 'utf8').includes('‹home›'),
+      'the portable home marker is resolved, not left in place');
   });
 });

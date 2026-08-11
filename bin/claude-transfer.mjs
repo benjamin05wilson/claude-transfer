@@ -39,7 +39,7 @@
  * can travel anywhere, or a session going to somebody who is not you.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, rmSync, renameSync } from 'node:fs';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { homedir, hostname, platform } from 'node:os';
 import { resolve, join, basename, dirname } from 'node:path';
@@ -58,6 +58,7 @@ import { serveOnce, collect, looksLikeUrl, MAX_BUNDLE_BYTES, lanAddress, reachBe
 import { captureWorkspace, inspectTarget, compareWorkspace, checkout, applyDiff } from '../src/workspace.mjs';
 import * as github from '../src/github.mjs';
 import { collectFolder, conflicts, MAX_FOLDER_BYTES } from '../src/folder.mjs';
+import { validateBundle } from '../src/validate.mjs';
 
 const FORMAT = 3;
 const die = (m) => { console.error(`claude-transfer: ${m}`); process.exit(1); };
@@ -438,23 +439,33 @@ const commands = {
     const source = flags._[0];
     if (!source) die('need a bundle file, a claude-transfer URL, or a gh: code');
 
+    // Fetched, never consumed. The courier copy is the only copy, and the old
+    // order deleted it here — before the format check, before any validation,
+    // before a byte was written. An unsupported format, a hostile path or a full
+    // disk then destroyed the transfer and left a partial session behind.
     let b;
+    let courier = null;
     if (github.looksLikeGhCode(source)) {
       const code = github.parseCode(source);
       if (!code) die('that gh: code looks malformed — copy the whole thing, including the # part');
       if (!code.key) die('that code has no key on the end — copy the whole line, including the # part');
       const blob = await github.get(code.id);
       b = parseBundle(decrypt(blob, code.key));
-      // Collected means consumed, exactly like the one-shot LAN transfer.
-      if (github.remove(code.id)) console.log('collected, and the gist is deleted');
-      else console.log('collected (could not delete the gist — remove it yourself if you like)');
+      courier = code.id;
     } else {
       b = looksLikeUrl(source) ? parseBundle(await collect(source)) : load(source);
     }
-    if (b.format > FORMAT) die(`bundle format ${b.format}; this build understands up to ${FORMAT}`);
 
     const into = resolve(strFlag(flags, 'into', process.cwd()));
     mkdirSync(into, { recursive: true });
+
+    // Everything checkable is checked before anything is written, so a bad
+    // bundle is refused whole rather than discovered halfway through.
+    const valid = validateBundle(b, { maxFormat: FORMAT, into });
+    if (!valid.ok) {
+      die(`refusing this bundle:\n  ${valid.errors.join('\n  ')}`
+        + (courier ? '\n\nThe transfer is still on GitHub — nothing was deleted.' : ''));
+    }
 
     const id = newSessionId();
     const records = b.transcript.map((line) => {
@@ -476,30 +487,78 @@ const commands = {
       fromHome: '‹home›', toHome: homedir(),
     });
 
-    writeTranscript(destinationFor(into, id), rehome(records, {
-      fromCwd: portableCwd, toCwd: into,
-      fromId: b.session.id, toId: id,
-      fromHome: '‹home›', toHome: homedir(),
-    }));
-
     // Does the work this conversation is about actually exist here?
     const here = inspectTarget(into);
     const ws = compareWorkspace(b.workspace, here, into);
 
+    const transcriptPath = destinationFor(into, id);
     const sidecarDir = join(projectsRoot(), encodeProjectDir(into), id);
-    const nSide = unpackDir(sidecarDir, b.sidecars, swap);
+    const historyDir = join(claudeDir(), 'file-history', id);
 
-    // File-history is `/rewind`'s undo data. Restoring another machine's
-    // snapshots into a checkout at a different commit means a rewind writes
-    // foreign content over real files and destroys uncommitted work. Only when
-    // the workspace genuinely matches.
-    const nHist = ws.safeForFileHistory
-      ? unpackDir(join(claudeDir(), 'file-history', id), b.fileHistory, swap)
-      : 0;
-    const skippedHist = ws.safeForFileHistory ? 0 : Object.keys(b.fileHistory ?? {}).length;
+    // Staged, then committed. Everything is built under one temporary directory
+    // and moved into place only once all of it exists and the transcript has
+    // been read back and found resumable. A failure part-way leaves the machine
+    // exactly as it was, rather than a half-session that `/resume` would offer.
+    const staging = join(claudeDir(), `.claude-transfer-staging-${randomBytes(6).toString('hex')}`);
+    let nSide = 0;
+    let nHist = 0;
+    let skippedHist = 0;
+
+    try {
+      mkdirSync(staging, { recursive: true });
+      const stagedTranscript = join(staging, 'transcript.jsonl');
+      const stagedSidecars = join(staging, 'sidecars');
+      const stagedHistory = join(staging, 'file-history');
+
+      writeTranscript(stagedTranscript, rehome(records, {
+        fromCwd: portableCwd, toCwd: into,
+        fromId: b.session.id, toId: id,
+        fromHome: '‹home›', toHome: homedir(),
+      }));
+
+      nSide = unpackDir(stagedSidecars, b.sidecars, swap);
+
+      // File-history is `/rewind`'s undo data. Restoring another machine's
+      // snapshots into a checkout at a different commit means a rewind writes
+      // foreign content over real files and destroys uncommitted work. Only when
+      // the workspace genuinely matches.
+      nHist = ws.safeForFileHistory ? unpackDir(stagedHistory, b.fileHistory, swap) : 0;
+      skippedHist = ws.safeForFileHistory ? 0 : Object.keys(b.fileHistory ?? {}).length;
+
+      // Read back what was actually written. A transcript that does not parse,
+      // or that lost its records, is not resumable — and finding that out now
+      // costs nothing, whereas finding out later costs the transfer.
+      const readBack = readTranscript(stagedTranscript);
+      if (readBack.length !== records.length) {
+        throw new Error(`wrote ${readBack.length} of ${records.length} records`);
+      }
+      if (!readBack.some((r) => r.type === 'user' || r.type === 'assistant' || r.__raw)) {
+        throw new Error('the written transcript has no conversation in it');
+      }
+
+      // Commit. Renames within one filesystem, so each is atomic.
+      mkdirSync(dirname(transcriptPath), { recursive: true });
+      renameSync(stagedTranscript, transcriptPath);
+      if (nSide) { mkdirSync(dirname(sidecarDir), { recursive: true }); renameSync(stagedSidecars, sidecarDir); }
+      if (nHist) { mkdirSync(dirname(historyDir), { recursive: true }); renameSync(stagedHistory, historyDir); }
+    } catch (e) {
+      rmSync(staging, { recursive: true, force: true });
+      die(`the import failed and nothing was changed: ${e.message}`
+        + (courier ? '\n\nThe transfer is still on GitHub — try again with the same code.' : ''));
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
 
     const nPrompts = appendHistory(join(claudeDir(), 'history.jsonl'),
       (b.prompts ?? []).map((p) => ({ ...p, sessionId: id, project: into })));
+
+    // Only now is the courier copy expendable: the session exists on disk and
+    // has been read back.
+    if (courier) {
+      console.log(github.remove(courier)
+        ? 'collected, and the transfer is deleted'
+        : 'collected (could not delete the transfer — remove it from your gists if you like)');
+    }
 
     console.log(`landed     ${destinationFor(into, id)}`);
     console.log(`restored   ${nSide} sidecar files  ·  ${nHist} history files  ·  ${nPrompts} prompts`);

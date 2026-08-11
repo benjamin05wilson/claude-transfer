@@ -31,8 +31,8 @@ Same chat, same history, same place in it.
   /transfer  →  Send                     /transfer  →  Receive
                                           ┌ paste the code
   gh:b1e7286c…#6bdfc9af26e945cb…   ────►  └ landed.
-                                            "Discuss implementation approach"
-  2.2 MB · 6 parts · encrypted                is in /resume now.
+                                          "Discuss implementation approach"
+  2.2 MB · 6 parts · encrypted             is in /resume now.
 ```
 
 <div align="center"><sub>
@@ -243,6 +243,6 @@ claude-transfer setup                            (re)install the /transfer skill
 
 <div align="center"><sub>
 
-MIT · built with [Claude Code](https://claude.com/claude-code)
+MIT ·
 
 </sub></div>

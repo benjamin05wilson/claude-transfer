@@ -4,6 +4,7 @@
 
 **Pick up a Claude Code conversation on another computer, with its full history.**
 
+[![ci](https://github.com/benjamin05wilson/claude-transfer/actions/workflows/ci.yml/badge.svg)](https://github.com/benjamin05wilson/claude-transfer/actions/workflows/ci.yml)
 [![MIT](https://img.shields.io/badge/licence-MIT-1c6ea4?style=flat-square)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-1c6ea4?style=flat-square)](https://nodejs.org)
 [![Platforms](https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-1c6ea4?style=flat-square)](#install)

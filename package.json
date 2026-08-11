@@ -19,7 +19,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "postinstall": "node -e \"console.log('\\nclaude-transfer installed. Run: claude-transfer setup\\n')\""
+    "postinstall": "node -e \"console.log('\\nclaude-transfer installed. Run: claude-transfer setup\\n')\"",
+    "test": "node test/run.mjs"
   },
   "keywords": [
     "claude-code",

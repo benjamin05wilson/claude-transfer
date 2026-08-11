@@ -53,6 +53,7 @@ import {
   packDir, unpackDir, readHistoryFor, appendHistory, encodeProjectDir, safeEntryPath, makeSwapper,
 } from '../src/session.mjs';
 import { redactText, redactTranscript, portablePaths, formatReport, summarise } from '../src/redact.mjs';
+import { redactBundle, verifyRedacted } from '../src/bundle-redact.mjs';
 import { serveOnce, collect, looksLikeUrl, MAX_BUNDLE_BYTES, lanAddress, reachBeyondLan, encrypt, decrypt } from '../src/wire.mjs';
 import { captureWorkspace, inspectTarget, compareWorkspace, checkout, applyDiff } from '../src/workspace.mjs';
 import * as github from '../src/github.mjs';
@@ -250,6 +251,47 @@ function build(flags) {
     fileHistory: history,
     prompts,
   };
+
+  // Everything above assembles the bundle. Redaction runs *here*, on the
+  // finished object, because the prompt history, the git diff, the origin remote
+  // and the working folder all arrive after the transcript has been scrubbed —
+  // and redacting the transcript alone shipped the same key in four other places
+  // under a label that said the bundle was safe.
+  const sweep = redactBundle(bundle, { seen, scanOnly: !redacting });
+  const swept = sweep.findings.filter((f) => !f.fake);
+
+  if (sweep.remotesStripped) {
+    console.log('remote    credentials stripped from the origin URL');
+  }
+
+  if (swept.length) {
+    const where = [...new Set(swept.map((f) => f.where))];
+    console.log(redacting
+      ? `also      ${swept.length} secret(s) removed from ${where.join(', ')}`
+      : `also      ${swept.length} secret(s) in ${where.join(', ')}`);
+  }
+
+  if (sweep.binaries.length) {
+    console.log(`binary    ${sweep.binaries.length} file(s) cannot be scanned or redacted: `
+      + `${sweep.binaries.slice(0, 3).join(', ')}${sweep.binaries.length > 3 ? ' …' : ''}`);
+    if (redacting) {
+      console.log('          they travel byte for byte — redaction cannot reach inside them');
+    }
+  }
+
+  // Check the work rather than trust the tally. The bug this guards against was
+  // a redactor that was confident and wrong, so a count it produced itself would
+  // have been equally confident.
+  if (redacting) {
+    const check = verifyRedacted(bundle);
+    if (!check.clean) {
+      const where = [...new Set(check.remaining.map((f) => f.where))];
+      die(`redaction did not hold: ${check.remaining.length} value(s) still present in `
+        + `${where.join(', ')}. Refusing to write a bundle labelled redacted. `
+        + 'Please report this with the rule name.');
+    }
+    console.log('verified  a second scan of the finished bundle found nothing left');
+  }
 
   const json = JSON.stringify(bundle);
   return { gz: gzipSync(Buffer.from(json), { level: 9 }), rawSize: json.length, session, title, report, redacting };
